@@ -248,6 +248,7 @@ static void vhost_vq_free_iovecs(struct vhost_virtqueue *vq)
 	vq->indirect = NULL;
 	kfree(vq->log);
 	vq->log = NULL;
+	vq->log_num = 0;
 	kfree(vq->heads);
 	vq->heads = NULL;
 	kfree(vq->ubuf_info);
@@ -316,6 +317,7 @@ long vhost_dev_init(struct vhost_dev *dev,
 
 	for (i = 0; i < dev->nvqs; ++i) {
 		dev->vqs[i].log = NULL;
+		dev->vqs[i].log_num = 0;
 		dev->vqs[i].indirect = NULL;
 		dev->vqs[i].heads = NULL;
 		dev->vqs[i].ubuf_info = NULL;
@@ -778,6 +780,27 @@ static const struct vhost_memory_region *find_region(struct vhost_memory *mem,
 	return NULL;
 }
 
+/* We mapped this address, now do the reverse.  If they change mem, this
+ * might fail, and they get a -EFAULT, as they deserve. */
+static bool reverse_map(struct vhost_memory *mem, void __user *gphys,
+			u64 *addr)
+{
+	struct vhost_memory_region *reg;
+	int i;
+
+	for (i = 0; i < mem->nregions; i++) {
+		reg = mem->regions + i;
+
+		*addr = (unsigned long)gphys + reg->guest_phys_addr
+			- reg->userspace_addr;
+
+		if (reg->guest_phys_addr <= *addr &&
+		    reg->guest_phys_addr + reg->memory_size - 1 >= *addr)
+			return true;
+	}
+	return false;
+}
+
 /* TODO: This is really inefficient.  We need something like get_user()
  * (instruction directly accesses the data, with an exception table entry
  * returning -EFAULT). See Documentation/x86/exception-tables.txt.
@@ -828,28 +851,40 @@ static int log_write(void __user *log_base,
 	return r;
 }
 
-int vhost_log_write(struct vhost_virtqueue *vq, struct vhost_log *log,
-		    unsigned int log_num, u64 len)
+static int log_data(struct vhost_virtqueue *vq)
 {
-	int i, r;
+	struct vhost_memory *mem;
+	unsigned int i;
+	int err = 0;
 
-	/* Make sure data written is seen before log. */
+	if (likely(!(vhost_has_feature(vq->dev, VHOST_F_LOG_ALL))))
+		return 0;
+
+	rcu_read_lock();
+	mem = rcu_dereference(vq->dev->memory);
+
+	/* Make sure writes hit before we log. */
 	smp_wmb();
-	for (i = 0; i < log_num; ++i) {
-		u64 l = min(log[i].len, len);
-		r = log_write(vq->log_base, log[i].addr, l);
-		if (r < 0)
-			return r;
-		len -= l;
-		if (!len) {
-			if (vq->log_ctx)
-				eventfd_signal(vq->log_ctx, 1);
-			return 0;
+
+	for (i = 0; i < vq->log_num; i++) {
+		u64 addr;
+
+		/* Can happen if they change mapping, but they deserve it. */
+		if (!reverse_map(mem, vq->log[i].iov_base, &addr)) {
+			err = -EFAULT;
+			break;
 		}
+
+		err = log_write(vq->log_base, addr, vq->log[i].iov_len);
+		if (err)
+			break;
 	}
-	/* Length written exceeds what we have stored. This is a bug. */
-	BUG();
-	return 0;
+	rcu_read_unlock();
+	if (vq->log_ctx)
+		eventfd_signal(vq->log_ctx, 1);
+	vq->log_num = 0;
+
+	return err;
 }
 
 static void log_used(struct vhost_virtqueue *vq)
@@ -958,7 +993,6 @@ static unsigned next_desc(struct vring_desc *desc)
 static int get_indirect(struct vhost_dev *dev, struct vhost_virtqueue *vq,
 			struct iovec iov[], unsigned int iov_size,
 			unsigned int *out_num, unsigned int *in_num,
-			struct vhost_log *log, unsigned int *log_num,
 			struct vring_desc *indirect)
 {
 	struct vring_desc desc;
@@ -1024,11 +1058,6 @@ static int get_indirect(struct vhost_dev *dev, struct vhost_virtqueue *vq,
 		/* If this is an input descriptor, increment that count. */
 		if (desc.flags & VRING_DESC_F_WRITE) {
 			*in_num += ret;
-			if (unlikely(log)) {
-				log[*log_num].addr = desc.addr;
-				log[*log_num].len = desc.len;
-				++*log_num;
-			}
 		} else {
 			/* If it's an output descriptor, they're all supposed
 			 * to come before any input descriptors. */
@@ -1053,8 +1082,7 @@ static int get_indirect(struct vhost_dev *dev, struct vhost_virtqueue *vq,
  * returned on error. */
 int vhost_get_vq_desc(struct vhost_dev *dev, struct vhost_virtqueue *vq,
 		      struct iovec iov[], unsigned int iov_size,
-		      unsigned int *out_num, unsigned int *in_num,
-		      struct vhost_log *log, unsigned int *log_num)
+		      unsigned int *out_num, unsigned int *in_num)
 {
 	struct vring_desc desc;
 	unsigned int i, head, found = 0;
@@ -1101,8 +1129,6 @@ int vhost_get_vq_desc(struct vhost_dev *dev, struct vhost_virtqueue *vq,
 
 	/* When we start there are none of either input nor output. */
 	*out_num = *in_num = 0;
-	if (unlikely(log))
-		*log_num = 0;
 
 	i = head;
 	do {
@@ -1126,8 +1152,7 @@ int vhost_get_vq_desc(struct vhost_dev *dev, struct vhost_virtqueue *vq,
 		}
 		if (desc.flags & VRING_DESC_F_INDIRECT) {
 			ret = get_indirect(dev, vq, iov, iov_size,
-					   out_num, in_num,
-					   log, log_num, &desc);
+					   out_num, in_num, &desc);
 			if (unlikely(ret < 0)) {
 				vq_err(vq, "Failure detected "
 				       "in indirect descriptor at idx %d\n", i);
@@ -1147,11 +1172,6 @@ int vhost_get_vq_desc(struct vhost_dev *dev, struct vhost_virtqueue *vq,
 			/* If this is an input descriptor,
 			 * increment that count. */
 			*in_num += ret;
-			if (unlikely(log)) {
-				log[*log_num].addr = desc.addr;
-				log[*log_num].len = desc.len;
-				++*log_num;
-			}
 		} else {
 			/* If it's an output descriptor, they're all supposed
 			 * to come before any input descriptors. */
@@ -1167,6 +1187,14 @@ int vhost_get_vq_desc(struct vhost_dev *dev, struct vhost_virtqueue *vq,
 	/* On success, increment avail index. */
 	vq->last_avail_idx++;
 
+	/* Save writable iovec for data logging later. */
+	if (unlikely(vhost_has_feature(vq->dev, VHOST_F_LOG_ALL))) {
+		BUG_ON(*in_num + vq->log_num > UIO_MAXIOV);
+		memcpy(vq->log + vq->log_num, iov + *out_num,
+		       *in_num * sizeof(vq->log[0]));
+		vq->log_num += *in_num;
+	}
+
 	/* Assume notifications from guest are disabled at this point,
 	 * if they aren't we would need to update avail_event index. */
 	BUG_ON(!(vq->used_flags & VRING_USED_F_NO_NOTIFY));
@@ -1176,6 +1204,8 @@ int vhost_get_vq_desc(struct vhost_dev *dev, struct vhost_virtqueue *vq,
 /* Reverse the effect of vhost_get_vq_desc. Useful for error handling. */
 void vhost_discard_vq_desc(struct vhost_virtqueue *vq, int n)
 {
+	/* Assume worst case, that they've written to descriptors. */
+	log_data(vq);
 	vq->last_avail_idx -= n;
 }
 
@@ -1203,6 +1233,7 @@ int vhost_add_used(struct vhost_virtqueue *vq, unsigned int head, int len)
 		return -EFAULT;
 	}
 	log_used(vq);
+	log_data(vq);
 
 	vq->last_used_idx++;
 	/* If the driver never bothers to signal in a very long while,
@@ -1264,6 +1295,7 @@ int vhost_add_used_n(struct vhost_virtqueue *vq, struct vring_used_elem *heads,
 		return -EFAULT;
 	}
 	log_used(vq);
+	log_data(vq);
 	return r;
 }
 

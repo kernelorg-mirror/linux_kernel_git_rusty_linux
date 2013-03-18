@@ -590,8 +590,7 @@ static void vhost_scsi_handle_vq(struct vhost_scsi *vs,
 
 	for (;;) {
 		head = vhost_get_vq_desc(&vs->dev, vq, vq->iov,
-					ARRAY_SIZE(vq->iov), &out, &in,
-					NULL, NULL);
+					ARRAY_SIZE(vq->iov), &out, &in);
 		pr_debug("vhost_get_vq_desc: head: %d, out: %u in: %u\n",
 					head, out, in);
 		/* On error, stop handling until the next kick. */

@@ -47,11 +47,6 @@ void vhost_poll_stop(struct vhost_poll *poll);
 void vhost_poll_flush(struct vhost_poll *poll);
 void vhost_poll_queue(struct vhost_poll *poll);
 
-struct vhost_log {
-	u64 addr;
-	u64 len;
-};
-
 struct vhost_virtqueue;
 
 struct vhost_ubuf_ref {
@@ -129,7 +124,11 @@ struct vhost_virtqueue {
 	void __rcu *private_data;
 	/* Log write descriptors */
 	void __user *log_base;
-	struct vhost_log *log;
+
+	/* If we're logging writes. */
+	struct iovec *log;
+	unsigned int log_num;
+
 	/* vhost zerocopy support fields below: */
 	/* last used idx for outstanding DMA zerocopy buffers */
 	int upend_idx;
@@ -169,9 +168,11 @@ long vhost_vring_ioctl(struct vhost_dev *d, int ioctl, void __user *argp);
 
 int vhost_get_vq_desc(struct vhost_dev *, struct vhost_virtqueue *,
 		      struct iovec iov[], unsigned int iov_count,
-		      unsigned int *out_num, unsigned int *in_num,
-		      struct vhost_log *log, unsigned int *log_num);
+		      unsigned int *out_num, unsigned int *in_num);
 void vhost_discard_vq_desc(struct vhost_virtqueue *, int n);
+
+int vhost_log_iov(struct vhost_virtqueue *vq,
+		  const struct iovec iov[], unsigned int iov_count);
 
 int vhost_init_used(struct vhost_virtqueue *);
 int vhost_add_used(struct vhost_virtqueue *, unsigned int head, int len);
@@ -184,9 +185,6 @@ void vhost_add_used_and_signal_n(struct vhost_dev *, struct vhost_virtqueue *,
 void vhost_signal(struct vhost_dev *, struct vhost_virtqueue *);
 void vhost_disable_notify(struct vhost_dev *, struct vhost_virtqueue *);
 bool vhost_enable_notify(struct vhost_dev *, struct vhost_virtqueue *);
-
-int vhost_log_write(struct vhost_virtqueue *vq, struct vhost_log *log,
-		    unsigned int log_num, u64 len);
 
 #define vq_err(vq, fmt, ...) do {                                  \
 		pr_debug(pr_fmt(fmt), ##__VA_ARGS__);       \

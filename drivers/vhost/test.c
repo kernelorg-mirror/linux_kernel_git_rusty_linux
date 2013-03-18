@@ -54,8 +54,7 @@ static void handle_vq(struct vhost_test *n)
 	for (;;) {
 		head = vhost_get_vq_desc(&n->dev, vq, vq->iov,
 					 ARRAY_SIZE(vq->iov),
-					 &out, &in,
-					 NULL, NULL);
+					 &out, &in);
 		/* On error, stop handling until the next kick. */
 		if (unlikely(head < 0))
 			break;

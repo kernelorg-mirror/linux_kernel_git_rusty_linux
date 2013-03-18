@@ -276,8 +276,7 @@ static void handle_tx(struct vhost_net *net)
 
 		head = vhost_get_vq_desc(&net->dev, vq, vq->iov,
 					 ARRAY_SIZE(vq->iov),
-					 &out, &in,
-					 NULL, NULL);
+					 &out, &in);
 		/* On error, stop handling until the next kick. */
 		if (unlikely(head < 0))
 			break;
@@ -408,8 +407,6 @@ static int peek_head_len(struct sock *sk)
  * @vq		- the relevant virtqueue
  * @datalen	- data length we'll be reading
  * @iovcount	- returned count of io vectors we fill
- * @log		- vhost log
- * @log_num	- log offset
  * @quota       - headcount quota, 1 for big buffer
  *	returns number of buffer heads allocated, negative on error
  */
@@ -417,15 +414,13 @@ static int get_rx_bufs(struct vhost_virtqueue *vq,
 		       struct vring_used_elem *heads,
 		       int datalen,
 		       unsigned *iovcount,
-		       struct vhost_log *log,
-		       unsigned *log_num,
 		       unsigned int quota)
 {
 	unsigned int out, in;
 	int seg = 0;
 	int headcount = 0;
 	unsigned d;
-	int r, nlogs = 0;
+	int r;
 
 	while (datalen > 0 && headcount < quota) {
 		if (unlikely(seg >= UIO_MAXIOV)) {
@@ -434,7 +429,7 @@ static int get_rx_bufs(struct vhost_virtqueue *vq,
 		}
 		d = vhost_get_vq_desc(vq->dev, vq, vq->iov + seg,
 				      ARRAY_SIZE(vq->iov) - seg, &out,
-				      &in, log, log_num);
+				      &in);
 		if (d == vq->num) {
 			r = 0;
 			goto err;
@@ -445,10 +440,6 @@ static int get_rx_bufs(struct vhost_virtqueue *vq,
 			r = -EINVAL;
 			goto err;
 		}
-		if (unlikely(log)) {
-			nlogs += *log_num;
-			log += *log_num;
-		}
 		heads[headcount].id = d;
 		heads[headcount].len = iov_length(vq->iov + seg, in);
 		datalen -= heads[headcount].len;
@@ -457,8 +448,6 @@ static int get_rx_bufs(struct vhost_virtqueue *vq,
 	}
 	heads[headcount - 1].len += datalen;
 	*iovcount = seg;
-	if (unlikely(log))
-		*log_num = nlogs;
 	return headcount;
 err:
 	vhost_discard_vq_desc(vq, headcount);
@@ -470,8 +459,7 @@ err:
 static void handle_rx(struct vhost_net *net)
 {
 	struct vhost_virtqueue *vq = &net->dev.vqs[VHOST_NET_VQ_RX];
-	unsigned uninitialized_var(in), log;
-	struct vhost_log *vq_log;
+	unsigned uninitialized_var(in);
 	struct msghdr msg = {
 		.msg_name = NULL,
 		.msg_namelen = 0,
@@ -500,15 +488,12 @@ static void handle_rx(struct vhost_net *net)
 	vhost_hlen = vq->vhost_hlen;
 	sock_hlen = vq->sock_hlen;
 
-	vq_log = unlikely(vhost_has_feature(&net->dev, VHOST_F_LOG_ALL)) ?
-		vq->log : NULL;
 	mergeable = vhost_has_feature(&net->dev, VIRTIO_NET_F_MRG_RXBUF);
 
 	while ((sock_len = peek_head_len(sock->sk))) {
 		sock_len += sock_hlen;
 		vhost_len = sock_len + vhost_hlen;
-		headcount = get_rx_bufs(vq, vq->heads, vhost_len,
-					&in, vq_log, &log,
+		headcount = get_rx_bufs(vq, vq->heads, vhost_len, &in,
 					likely(mergeable) ? UIO_MAXIOV : 1);
 		/* On error, stop handling until the next kick. */
 		if (unlikely(headcount < 0))
@@ -563,8 +548,7 @@ static void handle_rx(struct vhost_net *net)
 		}
 		vhost_add_used_and_signal_n(&net->dev, vq, vq->heads,
 					    headcount);
-		if (unlikely(vq_log))
-			vhost_log_write(vq, vq_log, log, vhost_len);
+
 		total_len += vhost_len;
 		if (unlikely(total_len >= VHOST_NET_WEIGHT)) {
 			vhost_poll_queue(&vq->poll);
