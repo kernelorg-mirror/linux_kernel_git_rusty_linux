@@ -474,120 +474,11 @@ void vhost_dev_cleanup(struct vhost_dev *dev, bool locked)
 	dev->mm = NULL;
 }
 
-static int log_access_ok(void __user *log_base, u64 addr, unsigned long sz)
-{
-	u64 a = addr / VHOST_PAGE_SIZE / 8;
-
-	/* Make sure 64 bit math will not overflow. */
-	if (a > ULONG_MAX - (unsigned long)log_base ||
-	    a + (unsigned long)log_base > ULONG_MAX)
-		return 0;
-
-	return access_ok(VERIFY_WRITE, log_base + a,
-			 (sz + VHOST_PAGE_SIZE * 8 - 1) / VHOST_PAGE_SIZE / 8);
-}
-
-/* Caller should have vq mutex and device mutex. */
-static int vq_memory_access_ok(void __user *log_base, struct vhost_memory *mem,
-			       int log_all)
-{
-	int i;
-
-	if (!mem)
-		return 0;
-
-	for (i = 0; i < mem->nregions; ++i) {
-		struct vhost_memory_region *m = mem->regions + i;
-		unsigned long a = m->userspace_addr;
-		if (m->memory_size > ULONG_MAX)
-			return 0;
-		else if (!access_ok(VERIFY_WRITE, (void __user *)a,
-				    m->memory_size))
-			return 0;
-		else if (log_all && !log_access_ok(log_base,
-						   m->guest_phys_addr,
-						   m->memory_size))
-			return 0;
-	}
-	return 1;
-}
-
-/* Can we switch to this memory table? */
-/* Caller should have device mutex but not vq mutex */
-static int memory_access_ok(struct vhost_dev *d, struct vhost_memory *mem,
-			    int log_all)
-{
-	int i;
-
-	for (i = 0; i < d->nvqs; ++i) {
-		int ok;
-		mutex_lock(&d->vqs[i].mutex);
-		/* If ring is inactive, will check when it's enabled. */
-		if (d->vqs[i].private_data)
-			ok = vq_memory_access_ok(d->vqs[i].log_base, mem,
-						 log_all);
-		else
-			ok = 1;
-		mutex_unlock(&d->vqs[i].mutex);
-		if (!ok)
-			return 0;
-	}
-	return 1;
-}
-
-static int vq_access_ok(struct vhost_dev *d, unsigned int num,
-			struct vring_desc __user *desc,
-			struct vring_avail __user *avail,
-			struct vring_used __user *used)
-{
-	size_t s = vhost_has_feature(d, VIRTIO_RING_F_EVENT_IDX) ? 2 : 0;
-	return access_ok(VERIFY_READ, desc, num * sizeof *desc) &&
-	       access_ok(VERIFY_READ, avail,
-			 sizeof *avail + num * sizeof *avail->ring + s) &&
-	       access_ok(VERIFY_WRITE, used,
-			sizeof *used + num * sizeof *used->ring + s);
-}
-
-/* Can we log writes? */
-/* Caller should have device mutex but not vq mutex */
-int vhost_log_access_ok(struct vhost_dev *dev)
-{
-	struct vhost_memory *mp;
-
-	mp = rcu_dereference_protected(dev->memory,
-				       lockdep_is_held(&dev->mutex));
-	return memory_access_ok(dev, mp, 1);
-}
-
-/* Verify access for write logging. */
-/* Caller should have vq mutex and device mutex */
-static int vq_log_access_ok(struct vhost_dev *d, struct vhost_virtqueue *vq,
-			    void __user *log_base)
-{
-	struct vhost_memory *mp;
-	size_t s = vhost_has_feature(d, VIRTIO_RING_F_EVENT_IDX) ? 2 : 0;
-
-	mp = rcu_dereference_protected(vq->dev->memory,
-				       lockdep_is_held(&vq->mutex));
-	return vq_memory_access_ok(log_base, mp,
-			    vhost_has_feature(vq->dev, VHOST_F_LOG_ALL)) &&
-		(!vq->log_used || log_access_ok(log_base, vq->log_addr,
-					sizeof *vq->used +
-					vq->num * sizeof *vq->used->ring + s));
-}
-
-/* Can we start vq? */
-/* Caller should have vq mutex and device mutex */
-int vhost_vq_access_ok(struct vhost_virtqueue *vq)
-{
-	return vq_access_ok(vq->dev, vq->num, vq->desc, vq->avail, vq->used) &&
-		vq_log_access_ok(vq->dev, vq, vq->log_base);
-}
-
 static long vhost_set_memory(struct vhost_dev *d, struct vhost_memory __user *m)
 {
 	struct vhost_memory mem, *newmem, *oldmem;
 	unsigned long size = offsetof(struct vhost_memory, regions);
+	unsigned int i;
 
 	if (copy_from_user(&mem, m, size))
 		return -EFAULT;
@@ -606,10 +497,13 @@ static long vhost_set_memory(struct vhost_dev *d, struct vhost_memory __user *m)
 		return -EFAULT;
 	}
 
-	if (!memory_access_ok(d, newmem,
-			      vhost_has_feature(d, VHOST_F_LOG_ALL))) {
-		kfree(newmem);
-		return -EFAULT;
+	/* Simple sanity check. */
+	for (i = 0; i < mem.nregions; i++) {
+		struct vhost_memory_region *r = newmem->regions + i;
+		if (r->guest_phys_addr + r->memory_size < r->guest_phys_addr) {
+			kfree(newmem);
+			return -EFAULT;
+		}
 	}
 	oldmem = rcu_dereference_protected(d->memory,
 					   lockdep_is_held(&d->mutex));
@@ -707,28 +601,6 @@ long vhost_vring_ioctl(struct vhost_dev *d, int ioctl, void __user *argp)
 		    (a.log_guest_addr & (sizeof *vq->used->ring - 1))) {
 			r = -EINVAL;
 			break;
-		}
-
-		/* We only verify access here if backend is configured.
-		 * If it is not, we don't as size might not have been setup.
-		 * We will verify when backend is configured. */
-		if (vq->private_data) {
-			if (!vq_access_ok(d, vq->num,
-				(void __user *)(unsigned long)a.desc_user_addr,
-				(void __user *)(unsigned long)a.avail_user_addr,
-				(void __user *)(unsigned long)a.used_user_addr)) {
-				r = -EINVAL;
-				break;
-			}
-
-			/* Also validate log access for used ring if enabled. */
-			if ((a.flags & (0x1 << VHOST_VRING_F_LOG)) &&
-			    !log_access_ok(vq->log_base, a.log_guest_addr,
-					   sizeof *vq->used +
-					   vq->num * sizeof *vq->used->ring)) {
-				r = -EINVAL;
-				break;
-			}
 		}
 
 		vq->log_used = !!(a.flags & (0x1 << VHOST_VRING_F_LOG));
@@ -851,11 +723,7 @@ long vhost_dev_ioctl(struct vhost_dev *d, unsigned int ioctl, void __user *argp)
 			void __user *base = (void __user *)(unsigned long)p;
 			vq = d->vqs + i;
 			mutex_lock(&vq->mutex);
-			/* If ring is inactive, will check when it's enabled. */
-			if (vq->private_data && !vq_log_access_ok(d, vq, base))
-				r = -EFAULT;
-			else
-				vq->log_base = base;
+			vq->log_base = base;
 			mutex_unlock(&vq->mutex);
 		}
 		break;
@@ -987,7 +855,7 @@ int vhost_log_write(struct vhost_virtqueue *vq, struct vhost_log *log,
 static int vhost_update_used_flags(struct vhost_virtqueue *vq)
 {
 	void __user *used;
-	if (__put_user(vq->used_flags, &vq->used->flags) < 0)
+	if (put_user(vq->used_flags, &vq->used->flags) < 0)
 		return -EFAULT;
 	if (unlikely(vq->log_used)) {
 		/* Make sure the flag is seen before log. */
@@ -1005,7 +873,7 @@ static int vhost_update_used_flags(struct vhost_virtqueue *vq)
 
 static int vhost_update_avail_event(struct vhost_virtqueue *vq, u16 avail_event)
 {
-	if (__put_user(vq->avail_idx, vhost_avail_event(vq)))
+	if (put_user(vq->avail_idx, vhost_avail_event(vq)))
 		return -EFAULT;
 	if (unlikely(vq->log_used)) {
 		void __user *used;
@@ -1201,7 +1069,7 @@ int vhost_get_vq_desc(struct vhost_dev *dev, struct vhost_virtqueue *vq,
 
 	/* Check it isn't doing very strange things with descriptor numbers. */
 	last_avail_idx = vq->last_avail_idx;
-	if (unlikely(__get_user(vq->avail_idx, &vq->avail->idx))) {
+	if (unlikely(get_user(vq->avail_idx, &vq->avail->idx))) {
 		vq_err(vq, "Failed to access avail idx at %p\n",
 		       &vq->avail->idx);
 		return -EFAULT;
@@ -1222,8 +1090,8 @@ int vhost_get_vq_desc(struct vhost_dev *dev, struct vhost_virtqueue *vq,
 
 	/* Grab the next descriptor number they're advertising, and increment
 	 * the index we've seen. */
-	if (unlikely(__get_user(head,
-				&vq->avail->ring[last_avail_idx % vq->num]))) {
+	if (unlikely(get_user(head,
+			      &vq->avail->ring[last_avail_idx % vq->num]))) {
 		vq_err(vq, "Failed to read head: idx %d address %p\n",
 		       last_avail_idx,
 		       &vq->avail->ring[last_avail_idx % vq->num]);
@@ -1256,7 +1124,7 @@ int vhost_get_vq_desc(struct vhost_dev *dev, struct vhost_virtqueue *vq,
 			       i, vq->num, head);
 			return -EINVAL;
 		}
-		ret = __copy_from_user(&desc, vq->desc + i, sizeof desc);
+		ret = copy_from_user(&desc, vq->desc + i, sizeof desc);
 		if (unlikely(ret)) {
 			vq_err(vq, "Failed to get descriptor: idx %d addr %p\n",
 			       i, vq->desc + i);
@@ -1326,17 +1194,17 @@ int vhost_add_used(struct vhost_virtqueue *vq, unsigned int head, int len)
 	/* The virtqueue contains a ring of used buffers.  Get a pointer to the
 	 * next entry in that used ring. */
 	used = &vq->used->ring[vq->last_used_idx % vq->num];
-	if (__put_user(head, &used->id)) {
+	if (put_user(head, &used->id)) {
 		vq_err(vq, "Failed to write used id");
 		return -EFAULT;
 	}
-	if (__put_user(len, &used->len)) {
+	if (put_user(len, &used->len)) {
 		vq_err(vq, "Failed to write used len");
 		return -EFAULT;
 	}
 	/* Make sure buffer is written before we update index. */
 	smp_wmb();
-	if (__put_user(vq->last_used_idx + 1, &vq->used->idx)) {
+	if (put_user(vq->last_used_idx + 1, &vq->used->idx)) {
 		vq_err(vq, "Failed to increment used idx");
 		return -EFAULT;
 	}
@@ -1375,7 +1243,7 @@ static int __vhost_add_used_n(struct vhost_virtqueue *vq,
 
 	start = vq->last_used_idx % vq->num;
 	used = vq->used->ring + start;
-	if (__copy_to_user(used, heads, count * sizeof *used)) {
+	if (copy_to_user(used, heads, count * sizeof *used)) {
 		vq_err(vq, "Failed to write used");
 		return -EFAULT;
 	}
@@ -1449,7 +1317,7 @@ static bool vhost_notify(struct vhost_dev *dev, struct vhost_virtqueue *vq)
 
 	if (!vhost_has_feature(dev, VIRTIO_RING_F_EVENT_IDX)) {
 		__u16 flags;
-		if (__get_user(flags, &vq->avail->flags)) {
+		if (get_user(flags, &vq->avail->flags)) {
 			vq_err(vq, "Failed to get flags");
 			return true;
 		}
@@ -1523,7 +1391,7 @@ bool vhost_enable_notify(struct vhost_dev *dev, struct vhost_virtqueue *vq)
 	/* They could have slipped one in as we were doing that: make
 	 * sure it's written, then check again. */
 	smp_mb();
-	r = __get_user(avail_idx, &vq->avail->idx);
+	r = get_user(avail_idx, &vq->avail->idx);
 	if (r) {
 		vq_err(vq, "Failed to check avail idx at %p: %d\n",
 		       &vq->avail->idx, r);

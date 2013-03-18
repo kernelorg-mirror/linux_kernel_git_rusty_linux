@@ -178,14 +178,6 @@ static long vhost_test_run(struct vhost_test *n, int test)
 		goto err;
 
 	for (index = 0; index < n->dev.nvqs; ++index) {
-		/* Verify that ring has been setup correctly. */
-		if (!vhost_vq_access_ok(&n->vqs[index])) {
-			r = -EFAULT;
-			goto err;
-		}
-	}
-
-	for (index = 0; index < n->dev.nvqs; ++index) {
 		vq = n->vqs + index;
 		mutex_lock(&vq->mutex);
 		priv = test ? n : NULL;
@@ -234,11 +226,6 @@ done:
 static int vhost_test_set_features(struct vhost_test *n, u64 features)
 {
 	mutex_lock(&n->dev.mutex);
-	if ((features & (1 << VHOST_F_LOG_ALL)) &&
-	    !vhost_log_access_ok(&n->dev)) {
-		mutex_unlock(&n->dev.mutex);
-		return -EFAULT;
-	}
 	n->dev.acked_features = features;
 	smp_wmb();
 	vhost_test_flush(n);

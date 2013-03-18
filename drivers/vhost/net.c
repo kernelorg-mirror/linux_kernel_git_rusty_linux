@@ -814,11 +814,6 @@ static long vhost_net_set_backend(struct vhost_net *n, unsigned index, int fd)
 	vq = n->vqs + index;
 	mutex_lock(&vq->mutex);
 
-	/* Verify that ring has been setup correctly. */
-	if (!vhost_vq_access_ok(vq)) {
-		r = -EFAULT;
-		goto err_vq;
-	}
 	sock = get_socket(fd);
 	if (IS_ERR(sock)) {
 		r = PTR_ERR(sock);
@@ -923,11 +918,6 @@ static int vhost_net_set_features(struct vhost_net *n, u64 features)
 		sock_hlen = hdr_len;
 	}
 	mutex_lock(&n->dev.mutex);
-	if ((features & (1 << VHOST_F_LOG_ALL)) &&
-	    !vhost_log_access_ok(&n->dev)) {
-		mutex_unlock(&n->dev.mutex);
-		return -EFAULT;
-	}
 	n->dev.acked_features = features;
 	smp_wmb();
 	for (i = 0; i < VHOST_NET_VQ_MAX; ++i) {
