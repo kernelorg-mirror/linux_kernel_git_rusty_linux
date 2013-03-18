@@ -53,6 +53,7 @@ config CAIF_VIRTIO
 	depends on CAIF
 	select VHOST_RING
 	select VIRTIO
+	select GENERIC_ALLOCATOR
 	default n
 	---help---
 	The caif driver for CAIF over Virtio.
