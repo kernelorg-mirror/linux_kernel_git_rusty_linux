@@ -148,6 +148,10 @@ long vhost_vring_ioctl(struct vhost_dev *d, int ioctl, void __user *argp);
 int vhost_get_vq_desc(struct vhost_dev *, struct vhost_virtqueue *,
 		      struct iovec iov[], unsigned int iov_count,
 		      unsigned int *out_num, unsigned int *in_num);
+int vhost_getdesc(struct vhost_dev *dev, struct vhost_virtqueue *vq,
+		  struct vringh_iov *riov,
+		  struct vringh_iov *wiov,
+		  u16 *head);
 void vhost_discard_vq_desc(struct vhost_virtqueue *, int n);
 
 int vhost_log_iov(struct vhost_virtqueue *vq,

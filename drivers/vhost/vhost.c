@@ -965,6 +965,28 @@ int vhost_get_vq_desc(struct vhost_dev *dev, struct vhost_virtqueue *vq,
 	return ret;
 }
 
+int vhost_getdesc(struct vhost_dev *dev, struct vhost_virtqueue *vq,
+		  struct vringh_iov *riov,
+		  struct vringh_iov *wiov,
+		  u16 *head)
+{
+	int ret;
+
+	ret = vringh_getdesc_user(&vq->vringh, riov, wiov, getrange, head);
+	if (ret <= 0)
+		return ret;
+
+	/* Save writable iovec for data logging later. */
+	if (unlikely(vhost_has_feature(vq->dev, VHOST_F_LOG_ALL)) && wiov) {
+		if (wiov->used + vq->log_num > UIO_MAXIOV)
+			return -ENOSPC;
+		memcpy(vq->log + vq->log_num, wiov->iov,
+		       wiov->used * sizeof(vq->log[0]));
+		vq->log_num += wiov->used;
+	}
+	return 1;
+}
+
 /* Reverse the effect of vhost_get_vq_desc. Useful for error handling. */
 void vhost_discard_vq_desc(struct vhost_virtqueue *vq, int n)
 {
