@@ -852,22 +852,27 @@ int vhost_log_write(struct vhost_virtqueue *vq, struct vhost_log *log,
 	return 0;
 }
 
+static void log_used(struct vhost_virtqueue *vq)
+{
+	if (likely(!vq->log_used))
+		return;
+
+	/* Make sure the changes are seen before log. */
+	smp_wmb();
+
+	/* Mark entire used ring: it's pretty small (+1 for avail_event). */
+	log_write(vq->log_base, vq->log_addr,
+		  offsetof(struct vring_used, ring[vq->num+1]));
+
+	if (vq->log_ctx)
+		eventfd_signal(vq->log_ctx, 1);
+}
+
 static int vhost_update_used_flags(struct vhost_virtqueue *vq)
 {
-	void __user *used;
 	if (put_user(vq->used_flags, &vq->used->flags) < 0)
 		return -EFAULT;
-	if (unlikely(vq->log_used)) {
-		/* Make sure the flag is seen before log. */
-		smp_wmb();
-		/* Log used flag write. */
-		used = &vq->used->flags;
-		log_write(vq->log_base, vq->log_addr +
-			  (used - (void __user *)vq->used),
-			  sizeof vq->used->flags);
-		if (vq->log_ctx)
-			eventfd_signal(vq->log_ctx, 1);
-	}
+	log_used(vq);
 	return 0;
 }
 
@@ -875,18 +880,7 @@ static int vhost_update_avail_event(struct vhost_virtqueue *vq, u16 avail_event)
 {
 	if (put_user(vq->avail_idx, vhost_avail_event(vq)))
 		return -EFAULT;
-	if (unlikely(vq->log_used)) {
-		void __user *used;
-		/* Make sure the event is seen before log. */
-		smp_wmb();
-		/* Log avail event write */
-		used = vhost_avail_event(vq);
-		log_write(vq->log_base, vq->log_addr +
-			  (used - (void __user *)vq->used),
-			  sizeof *vhost_avail_event(vq));
-		if (vq->log_ctx)
-			eventfd_signal(vq->log_ctx, 1);
-	}
+	log_used(vq);
 	return 0;
 }
 
@@ -1208,21 +1202,8 @@ int vhost_add_used(struct vhost_virtqueue *vq, unsigned int head, int len)
 		vq_err(vq, "Failed to increment used idx");
 		return -EFAULT;
 	}
-	if (unlikely(vq->log_used)) {
-		/* Make sure data is seen before log. */
-		smp_wmb();
-		/* Log used ring entry write. */
-		log_write(vq->log_base,
-			  vq->log_addr +
-			   ((void __user *)used - (void __user *)vq->used),
-			  sizeof *used);
-		/* Log used index update. */
-		log_write(vq->log_base,
-			  vq->log_addr + offsetof(struct vring_used, idx),
-			  sizeof vq->used->idx);
-		if (vq->log_ctx)
-			eventfd_signal(vq->log_ctx, 1);
-	}
+	log_used(vq);
+
 	vq->last_used_idx++;
 	/* If the driver never bothers to signal in a very long while,
 	 * used index might wrap around. If that happens, invalidate
@@ -1246,15 +1227,6 @@ static int __vhost_add_used_n(struct vhost_virtqueue *vq,
 	if (copy_to_user(used, heads, count * sizeof *used)) {
 		vq_err(vq, "Failed to write used");
 		return -EFAULT;
-	}
-	if (unlikely(vq->log_used)) {
-		/* Make sure data is seen before log. */
-		smp_wmb();
-		/* Log used ring entry write. */
-		log_write(vq->log_base,
-			  vq->log_addr +
-			   ((void __user *)used - (void __user *)vq->used),
-			  count * sizeof *used);
 	}
 	old = vq->last_used_idx;
 	new = (vq->last_used_idx += count);
@@ -1291,14 +1263,7 @@ int vhost_add_used_n(struct vhost_virtqueue *vq, struct vring_used_elem *heads,
 		vq_err(vq, "Failed to increment used idx");
 		return -EFAULT;
 	}
-	if (unlikely(vq->log_used)) {
-		/* Log used index update. */
-		log_write(vq->log_base,
-			  vq->log_addr + offsetof(struct vring_used, idx),
-			  sizeof vq->used->idx);
-		if (vq->log_ctx)
-			eventfd_signal(vq->log_ctx, 1);
-	}
+	log_used(vq);
 	return r;
 }
 
