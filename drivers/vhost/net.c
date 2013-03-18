@@ -226,19 +226,32 @@ static void vhost_zerocopy_callback(struct ubuf_info *ubuf, bool success)
 	vhost_ubuf_put(ubufs);
 }
 
+static size_t discard_data(struct vringh_iov *iov, size_t len)
+{
+	size_t done = 0;
+
+	while (len && iov->i < iov->used) {
+		size_t partlen;
+
+		partlen = min(iov->iov[iov->i].iov_len, len);
+		vringh_iov_consume(iov, partlen);
+		done += partlen;
+		len -= partlen;
+	}
+	return done;
+}	
+
 /* Expects to be always run from workqueue - which acts as
  * read-size critical section for our kind of RCU. */
 static void handle_tx(struct vhost_net *net)
 {
 	struct vhost_virtqueue *vq = &net->dev.vqs[VHOST_NET_VQ_TX];
-	unsigned out, in, s;
-	int head;
+	u16 head;
 	struct msghdr msg = {
 		.msg_name = NULL,
 		.msg_namelen = 0,
 		.msg_control = NULL,
 		.msg_controllen = 0,
-		.msg_iov = vq->iov,
 		.msg_flags = MSG_DONTWAIT,
 	};
 	size_t len, total_len = 0;
@@ -247,6 +260,8 @@ static void handle_tx(struct vhost_net *net)
 	struct socket *sock;
 	struct vhost_ubuf_ref *uninitialized_var(ubufs);
 	bool zcopy, zcopy_used;
+	struct iovec iov[1 + MAX_SKB_FRAGS];
+	struct vringh_iov riov;
 
 	/* TODO: check that we are running from vhost_worker? */
 	sock = rcu_dereference_check(vq->private_data, 1);
@@ -269,19 +284,21 @@ static void handle_tx(struct vhost_net *net)
 	hdr_size = vq->vhost_hlen;
 	zcopy = vq->ubufs;
 
+	vringh_iov_init(&riov, iov, ARRAY_SIZE(iov));
+
 	for (;;) {
 		/* Release DMAs done buffers first */
 		if (zcopy)
 			vhost_zerocopy_signal_used(net, vq);
 
-		head = vhost_get_vq_desc(&net->dev, vq, vq->iov,
-					 ARRAY_SIZE(vq->iov),
-					 &out, &in);
+		err = vhost_getdesc(&net->dev, vq, &riov, NULL, &head);
+
 		/* On error, stop handling until the next kick. */
-		if (unlikely(head < 0))
+		if (unlikely(err < 0))
 			break;
+
 		/* Nothing new?  Wait for eventfd to tell us they refilled. */
-		if (head == vq->vringh.vring.num) {
+		if (err == 0) {
 			int num_pends;
 
 			wmem = atomic_read(&sock->sk->sk_wmem_alloc);
@@ -307,22 +324,17 @@ static void handle_tx(struct vhost_net *net)
 			}
 			break;
 		}
-		if (in) {
-			vq_err(vq, "Unexpected descriptor format for TX: "
-			       "out %d, int %d\n", out, in);
-			break;
-		}
+
 		/* Skip header. TODO: support TSO. */
-		s = move_iovec_hdr(vq->iov, vq->hdr, hdr_size, out);
-		msg.msg_iovlen = out;
-		len = iov_length(vq->iov, out);
-		/* Sanity check */
-		if (!len) {
-			vq_err(vq, "Unexpected header len for TX: "
-			       "%zd expected %zd\n",
-			       iov_length(vq->hdr, s), hdr_size);
+		if (discard_data(&riov, hdr_size) < hdr_size) {
+			vq_err(vq, "Unexpected len for TX: "
+			       "%zd expected >= %zd\n", len, hdr_size);
 			break;
 		}
+
+		len = iov_length(riov.iov + riov.i, riov.used - riov.i);
+		msg.msg_iov = riov.iov + riov.i;
+		msg.msg_iovlen = riov.used - riov.i;
 		zcopy_used = zcopy && (len >= VHOST_GOODCOPY_LEN ||
 				       vq->upend_idx != vq->done_idx);
 
@@ -380,6 +392,7 @@ static void handle_tx(struct vhost_net *net)
 			break;
 		}
 	}
+	vringh_iov_cleanup(&riov);
 
 	mutex_unlock(&vq->mutex);
 }
