@@ -421,22 +421,14 @@ static int get_single_rxbuf(struct vhost_virtqueue *vq,
 			    size_t vhost_len,
 			    struct vringh_iov *wiov)
 {
-	int desc;
-	unsigned int out, in;
+	int err;
+	u16 h;
 
-	desc = vhost_get_vq_desc(vq->dev, vq, wiov->iov, wiov->max_num,
-				 &out, &in);
-	if (desc < 0)
-		return desc;
-	if (desc == vq->vringh.vring.num)
-		return 0;
-	if (unlikely(out || in == 0)) {
-		vq_err(vq, "unexpected descriptor format for RX: "
-		       "out %d, in %d\n", out, in);
-		goto err;
-	}
-	wiov->used = in;
-	head->id = desc;
+	err = vhost_getdesc(vq->dev, vq, NULL, wiov, &h);
+	if (err <= 0)
+		return err;
+
+	head->id = h;
 	head->len = iov_length(wiov->iov, wiov->used);
 	if (unlikely(head->len < vhost_len)) {
 		vq_err(vq, "unexpected descriptor length for RX: %u < %zu \n",
@@ -456,40 +448,29 @@ static int get_multi_rxbuf(struct vhost_virtqueue *vq,
 			    size_t vhost_len,
 			    struct vringh_iov *wiov)
 {
-	unsigned int out, in;
 	int headcount = 0;
 	int r;
 
 	while (vhost_len > 0) {
+		u16 head;
+		unsigned int old_used = wiov->used;
+
 		/* Too many segments? */
-		if (wiov->used == wiov->max_num) {
+		if (headcount == UIO_MAXIOV) {
 			vq_err(vq, "%u rx buffers, still need %zu bytes\n",
-			       wiov->used, vhost_len);
+			       headcount, vhost_len);
 			r = -ENOBUFS;
 			goto err;
 		}
 
-		r = vhost_get_vq_desc(vq->dev, vq, wiov->iov + wiov->used,
-				      wiov->max_num - wiov->used, &out,
-				      &in);
-		if (r < 0)
+		r = vhost_getdesc(vq->dev, vq, NULL, wiov, &head);
+		if (r <= 0)
 			goto err;
-
-		if (r == vq->vringh.vring.num) {
-			r = 0;
-			goto err;
-		}
-		if (unlikely(out || in <= 0)) {
-			vq_err(vq, "unexpected descriptor format for RX: "
-				"out %d, in %d\n", out, in);
-			r = -EINVAL;
-			goto err;
-		}
-		heads[headcount].id = r;
-		heads[headcount].len = iov_length(vq->iov + wiov->used, in);
+		heads[headcount].id = head;
+		heads[headcount].len = iov_length(wiov->iov + old_used,
+						  wiov->used - old_used);
 		vhost_len -= heads[headcount].len;
 		++headcount;
-		wiov->used += in;
 	}
 	return headcount;
 err:
@@ -532,12 +513,14 @@ static void handle_rx(struct vhost_net *net)
 	sock_hlen = vq->sock_hlen;
 
 	mergeable = vhost_has_feature(&net->dev, VIRTIO_NET_F_MRG_RXBUF);
+	vringh_iov_init(&wiov, vq->iov, UIO_MAXIOV);
 
 	while ((sock_len = peek_head_len(sock->sk))) {
 		sock_len += sock_hlen;
 		vhost_len = sock_len + vhost_hlen;
 
-		vringh_iov_init(&wiov, vq->iov, UIO_MAXIOV);
+		wiov.used = 0;
+		vringh_iov_reset(&wiov);
 
 		if (likely(mergeable))
 			err = get_multi_rxbuf(vq, vq->heads, vhost_len, &wiov);
@@ -608,6 +591,7 @@ static void handle_rx(struct vhost_net *net)
 	}
 
 	mutex_unlock(&vq->mutex);
+	vringh_iov_cleanup(&wiov);
 }
 
 static void handle_tx_kick(struct vhost_work *work)
