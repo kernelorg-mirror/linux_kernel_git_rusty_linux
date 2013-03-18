@@ -281,7 +281,7 @@ static void handle_tx(struct vhost_net *net)
 		if (unlikely(head < 0))
 			break;
 		/* Nothing new?  Wait for eventfd to tell us they refilled. */
-		if (head == vq->num) {
+		if (head == vq->vringh.vring.num) {
 			int num_pends;
 
 			wmem = atomic_read(&sock->sk->sk_wmem_alloc);
@@ -430,7 +430,7 @@ static int get_rx_bufs(struct vhost_virtqueue *vq,
 		d = vhost_get_vq_desc(vq->dev, vq, vq->iov + seg,
 				      ARRAY_SIZE(vq->iov) - seg, &out,
 				      &in);
-		if (d == vq->num) {
+		if (d == vq->vringh.vring.num) {
 			r = 0;
 			goto err;
 		}

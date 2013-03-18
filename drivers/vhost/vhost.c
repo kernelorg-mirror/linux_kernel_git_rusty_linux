@@ -35,9 +35,6 @@ enum {
 
 static unsigned vhost_zcopy_mask __read_mostly;
 
-#define vhost_used_event(vq) ((u16 __user *)&vq->avail->ring[vq->num])
-#define vhost_avail_event(vq) ((u16 __user *)&vq->used->ring[vq->num])
-
 static void vhost_poll_func(struct file *file, wait_queue_head_t *wqh,
 			    poll_table *pt)
 {
@@ -166,16 +163,7 @@ void vhost_poll_queue(struct vhost_poll *poll)
 static void vhost_vq_reset(struct vhost_dev *dev,
 			   struct vhost_virtqueue *vq)
 {
-	vq->num = 1;
-	vq->desc = NULL;
-	vq->avail = NULL;
-	vq->used = NULL;
-	vq->last_avail_idx = 0;
-	vq->avail_idx = 0;
-	vq->last_used_idx = 0;
-	vq->signalled_used = 0;
-	vq->signalled_used_valid = false;
-	vq->used_flags = 0;
+	vringh_init_user(&vq->vringh, 0, 1, true, NULL, NULL, NULL);
 	vq->log_used = false;
 	vq->log_addr = -1ull;
 	vq->vhost_hlen = 0;
@@ -244,8 +232,6 @@ static int vhost_worker(void *data)
 
 static void vhost_vq_free_iovecs(struct vhost_virtqueue *vq)
 {
-	kfree(vq->indirect);
-	vq->indirect = NULL;
 	kfree(vq->log);
 	vq->log = NULL;
 	vq->log_num = 0;
@@ -267,8 +253,6 @@ static long vhost_dev_alloc_iovecs(struct vhost_dev *dev)
 	bool zcopy;
 
 	for (i = 0; i < dev->nvqs; ++i) {
-		dev->vqs[i].indirect = kmalloc(sizeof *dev->vqs[i].indirect *
-					       UIO_MAXIOV, GFP_KERNEL);
 		dev->vqs[i].log = kmalloc(sizeof *dev->vqs[i].log * UIO_MAXIOV,
 					  GFP_KERNEL);
 		dev->vqs[i].heads = kmalloc(sizeof *dev->vqs[i].heads *
@@ -278,7 +262,7 @@ static long vhost_dev_alloc_iovecs(struct vhost_dev *dev)
 			dev->vqs[i].ubuf_info =
 				kmalloc(sizeof *dev->vqs[i].ubuf_info *
 					UIO_MAXIOV, GFP_KERNEL);
-		if (!dev->vqs[i].indirect || !dev->vqs[i].log ||
+		if (!dev->vqs[i].log ||
 			!dev->vqs[i].heads ||
 			(zcopy && !dev->vqs[i].ubuf_info))
 			goto err_nomem;
@@ -318,7 +302,6 @@ long vhost_dev_init(struct vhost_dev *dev,
 	for (i = 0; i < dev->nvqs; ++i) {
 		dev->vqs[i].log = NULL;
 		dev->vqs[i].log_num = 0;
-		dev->vqs[i].indirect = NULL;
 		dev->vqs[i].heads = NULL;
 		dev->vqs[i].ubuf_info = NULL;
 		dev->vqs[i].dev = dev;
@@ -554,7 +537,7 @@ long vhost_vring_ioctl(struct vhost_dev *d, int ioctl, void __user *argp)
 			r = -EINVAL;
 			break;
 		}
-		vq->num = s.num;
+		vq->vringh.vring.num = s.num;
 		break;
 	case VHOST_SET_VRING_BASE:
 		/* Moving base with an active backend?
@@ -571,13 +554,11 @@ long vhost_vring_ioctl(struct vhost_dev *d, int ioctl, void __user *argp)
 			r = -EINVAL;
 			break;
 		}
-		vq->last_avail_idx = s.num;
-		/* Forget the cached index value. */
-		vq->avail_idx = vq->last_avail_idx;
+		vq->vringh.last_avail_idx = s.num;
 		break;
 	case VHOST_GET_VRING_BASE:
 		s.index = idx;
-		s.num = vq->last_avail_idx;
+		s.num = vq->vringh.last_avail_idx;
 		if (copy_to_user(argp, &s, sizeof s))
 			r = -EFAULT;
 		break;
@@ -598,18 +579,18 @@ long vhost_vring_ioctl(struct vhost_dev *d, int ioctl, void __user *argp)
 			r = -EFAULT;
 			break;
 		}
-		if ((a.avail_user_addr & (sizeof *vq->avail->ring - 1)) ||
-		    (a.used_user_addr & (sizeof *vq->used->ring - 1)) ||
-		    (a.log_guest_addr & (sizeof *vq->used->ring - 1))) {
+		if ((a.avail_user_addr & (sizeof *vq->vringh.vring.avail->ring - 1)) ||
+		    (a.used_user_addr & (sizeof *vq->vringh.vring.used->ring - 1)) ||
+		    (a.log_guest_addr & (sizeof *vq->vringh.vring.used->ring - 1))) {
 			r = -EINVAL;
 			break;
 		}
 
 		vq->log_used = !!(a.flags & (0x1 << VHOST_VRING_F_LOG));
-		vq->desc = (void __user *)(unsigned long)a.desc_user_addr;
-		vq->avail = (void __user *)(unsigned long)a.avail_user_addr;
+		vq->vringh.vring.desc = (void __user *)(unsigned long)a.desc_user_addr;
+		vq->vringh.vring.avail = (void __user *)(unsigned long)a.avail_user_addr;
+		vq->vringh.vring.used = (void __user *)(unsigned long)a.used_user_addr;
 		vq->log_addr = a.log_guest_addr;
-		vq->used = (void __user *)(unsigned long)a.used_user_addr;
 		break;
 	case VHOST_SET_VRING_KICK:
 		if (copy_from_user(&f, argp, sizeof f)) {
@@ -763,23 +744,6 @@ done:
 	return r;
 }
 
-static const struct vhost_memory_region *find_region(struct vhost_memory *mem,
-						     __u64 addr, __u32 len)
-{
-	struct vhost_memory_region *reg;
-	int i;
-
-	/* linear search is not brilliant, but we really have on the order of 6
-	 * regions in practice */
-	for (i = 0; i < mem->nregions; ++i) {
-		reg = mem->regions + i;
-		if (reg->guest_phys_addr <= addr &&
-		    reg->guest_phys_addr + reg->memory_size - 1 >= addr)
-			return reg;
-	}
-	return NULL;
-}
-
 /* We mapped this address, now do the reverse.  If they change mem, this
  * might fail, and they get a -EFAULT, as they deserve. */
 static bool reverse_map(struct vhost_memory *mem, void __user *gphys,
@@ -897,179 +861,55 @@ static void log_used(struct vhost_virtqueue *vq)
 
 	/* Mark entire used ring: it's pretty small (+1 for avail_event). */
 	log_write(vq->log_base, vq->log_addr,
-		  offsetof(struct vring_used, ring[vq->num+1]));
+		  offsetof(struct vring_used, ring[vq->vringh.vring.num+1]));
 
 	if (vq->log_ctx)
 		eventfd_signal(vq->log_ctx, 1);
 }
 
-static int vhost_update_used_flags(struct vhost_virtqueue *vq)
-{
-	if (put_user(vq->used_flags, &vq->used->flags) < 0)
-		return -EFAULT;
-	log_used(vq);
-	return 0;
-}
-
-static int vhost_update_avail_event(struct vhost_virtqueue *vq, u16 avail_event)
-{
-	if (put_user(vq->avail_idx, vhost_avail_event(vq)))
-		return -EFAULT;
-	log_used(vq);
-	return 0;
-}
-
 int vhost_init_used(struct vhost_virtqueue *vq)
 {
-	int r;
 	if (!vq->private_data)
 		return 0;
 
-	r = vhost_update_used_flags(vq);
-	if (r)
-		return r;
-	vq->signalled_used_valid = false;
-	return get_user(vq->last_used_idx, &vq->used->idx);
+	if (put_user(0, &vq->vringh.vring.used->flags) < 0)
+		return -EFAULT;
+	log_used(vq);
+
+	return get_user(vq->vringh.last_used_idx, &vq->vringh.vring.used->idx);
 }
 
-static int translate_desc(struct vhost_dev *dev, u64 addr, u32 len,
-			  struct iovec iov[], int iov_size)
+static bool getrange(struct vringh *vrh, u64 addr, struct vringh_range *r)
 {
-	const struct vhost_memory_region *reg;
-	struct vhost_memory *mem;
-	struct iovec *_iov;
-	u64 s = 0;
-	int ret = 0;
+	struct vhost_virtqueue *vq;
+	const struct vhost_memory *mem;
+	int i;
+	bool ret;
+
+	vq = container_of(vrh, struct vhost_virtqueue, vringh);
 
 	rcu_read_lock();
+	mem = rcu_dereference(vq->dev->memory);
 
-	mem = rcu_dereference(dev->memory);
-	while ((u64)len > s) {
-		u64 size;
-		if (unlikely(ret >= iov_size)) {
-			ret = -ENOBUFS;
-			break;
+	/* linear search is not brilliant, but we really have on the order of 6
+	 * regions in practice */
+	for (i = 0; i < mem->nregions; ++i) {
+		const struct vhost_memory_region *reg = mem->regions + i;
+
+		if (reg->guest_phys_addr <= addr &&
+		    reg->guest_phys_addr + reg->memory_size - 1 >= addr) {
+			r->start = reg->guest_phys_addr;
+			r->end_incl = reg->guest_phys_addr + reg->memory_size - 1;
+			r->offset = reg->userspace_addr;
+			ret = true;
+			goto out;
 		}
-		reg = find_region(mem, addr, len);
-		if (unlikely(!reg)) {
-			ret = -EFAULT;
-			break;
-		}
-		_iov = iov + ret;
-		size = reg->memory_size - addr + reg->guest_phys_addr;
-		_iov->iov_len = min((u64)len - s, size);
-		_iov->iov_base = (void __user *)(unsigned long)
-			(reg->userspace_addr + addr - reg->guest_phys_addr);
-		s += size;
-		addr += size;
-		++ret;
 	}
+	ret = false;
 
+out:
 	rcu_read_unlock();
 	return ret;
-}
-
-/* Each buffer in the virtqueues is actually a chain of descriptors.  This
- * function returns the next descriptor in the chain,
- * or -1U if we're at the end. */
-static unsigned next_desc(struct vring_desc *desc)
-{
-	unsigned int next;
-
-	/* If this descriptor says it doesn't chain, we're done. */
-	if (!(desc->flags & VRING_DESC_F_NEXT))
-		return -1U;
-
-	/* Check they're not leading us off end of descriptors. */
-	next = desc->next;
-	/* Make sure compiler knows to grab that: we don't want it changing! */
-	/* We will use the result as an index in an array, so most
-	 * architectures only need a compiler barrier here. */
-	read_barrier_depends();
-
-	return next;
-}
-
-static int get_indirect(struct vhost_dev *dev, struct vhost_virtqueue *vq,
-			struct iovec iov[], unsigned int iov_size,
-			unsigned int *out_num, unsigned int *in_num,
-			struct vring_desc *indirect)
-{
-	struct vring_desc desc;
-	unsigned int i = 0, count, found = 0;
-	int ret;
-
-	/* Sanity check */
-	if (unlikely(indirect->len % sizeof desc)) {
-		vq_err(vq, "Invalid length in indirect descriptor: "
-		       "len 0x%llx not multiple of 0x%zx\n",
-		       (unsigned long long)indirect->len,
-		       sizeof desc);
-		return -EINVAL;
-	}
-
-	ret = translate_desc(dev, indirect->addr, indirect->len, vq->indirect,
-			     UIO_MAXIOV);
-	if (unlikely(ret < 0)) {
-		vq_err(vq, "Translation failure %d in indirect.\n", ret);
-		return ret;
-	}
-
-	/* We will use the result as an address to read from, so most
-	 * architectures only need a compiler barrier here. */
-	read_barrier_depends();
-
-	count = indirect->len / sizeof desc;
-	/* Buffers are chained via a 16 bit next field, so
-	 * we can have at most 2^16 of these. */
-	if (unlikely(count > USHRT_MAX + 1)) {
-		vq_err(vq, "Indirect buffer length too big: %d\n",
-		       indirect->len);
-		return -E2BIG;
-	}
-
-	do {
-		unsigned iov_count = *in_num + *out_num;
-		if (unlikely(++found > count)) {
-			vq_err(vq, "Loop detected: last one at %u "
-			       "indirect size %u\n",
-			       i, count);
-			return -EINVAL;
-		}
-		if (unlikely(memcpy_fromiovec((unsigned char *)&desc,
-					      vq->indirect, sizeof desc))) {
-			vq_err(vq, "Failed indirect descriptor: idx %d, %zx\n",
-			       i, (size_t)indirect->addr + i * sizeof desc);
-			return -EINVAL;
-		}
-		if (unlikely(desc.flags & VRING_DESC_F_INDIRECT)) {
-			vq_err(vq, "Nested indirect descriptor: idx %d, %zx\n",
-			       i, (size_t)indirect->addr + i * sizeof desc);
-			return -EINVAL;
-		}
-
-		ret = translate_desc(dev, desc.addr, desc.len, iov + iov_count,
-				     iov_size - iov_count);
-		if (unlikely(ret < 0)) {
-			vq_err(vq, "Translation failure %d indirect idx %d\n",
-			       ret, i);
-			return ret;
-		}
-		/* If this is an input descriptor, increment that count. */
-		if (desc.flags & VRING_DESC_F_WRITE) {
-			*in_num += ret;
-		} else {
-			/* If it's an output descriptor, they're all supposed
-			 * to come before any input descriptors. */
-			if (unlikely(*in_num)) {
-				vq_err(vq, "Indirect descriptor "
-				       "has out after in: idx %d\n", i);
-				return -EINVAL;
-			}
-			*out_num += ret;
-		}
-	} while ((i = next_desc(&desc)) != -1);
-	return 0;
 }
 
 /* This looks in the virtqueue and for the first available buffer, and converts
@@ -1077,128 +917,52 @@ static int get_indirect(struct vhost_dev *dev, struct vhost_virtqueue *vq,
  * number of output then some number of input descriptors, it's actually two
  * iovecs, but we pack them into one and note how many of each there were.
  *
- * This function returns the descriptor number found, or vq->num (which is
- * never a valid descriptor number) if none was found.  A negative code is
- * returned on error. */
+ * This function returns the descriptor number found, or vq->vringh.vring.num
+ * (which is never a valid descriptor number) if none was found.  A
+ * negative code is returned on error. */
 int vhost_get_vq_desc(struct vhost_dev *dev, struct vhost_virtqueue *vq,
 		      struct iovec iov[], unsigned int iov_size,
 		      unsigned int *out_num, unsigned int *in_num)
 {
-	struct vring_desc desc;
-	unsigned int i, head, found = 0;
-	u16 last_avail_idx;
 	int ret;
+	u16 head;
+	struct vringh_iov riov, wiov;
 
-	/* Check it isn't doing very strange things with descriptor numbers. */
-	last_avail_idx = vq->last_avail_idx;
-	if (unlikely(get_user(vq->avail_idx, &vq->avail->idx))) {
-		vq_err(vq, "Failed to access avail idx at %p\n",
-		       &vq->avail->idx);
-		return -EFAULT;
+	/* Assumes half for each. */
+	vringh_iov_init(&riov, iov, iov_size / 2);
+	vringh_iov_init(&wiov, iov + iov_size / 2, iov_size / 2);
+
+	ret = vringh_getdesc_user(&vq->vringh, &riov, &wiov, getrange, &head);
+	if (ret < 0)
+		/* FIXME: Distinguish between invalid desc and invalid ring */
+		return ret;
+
+	if (ret == 0)
+		return vq->vringh.vring.num;
+
+	/* We got one! */
+	if (riov.used + wiov.used > iov_size)
+		ret = -ENOBUFS;
+	else {
+		*out_num = riov.used;
+		*in_num = wiov.used;
+		memmove(iov, riov.iov, riov.used * sizeof(iov[0]));
+		memmove(iov + *out_num, wiov.iov, wiov.used * sizeof(iov[0]));
+		ret = head;
+
+		/* Save writable iovec for data logging later. */
+		if (unlikely(vhost_has_feature(vq->dev, VHOST_F_LOG_ALL))) {
+			BUG_ON(wiov.used + vq->log_num > UIO_MAXIOV);
+			memcpy(vq->log + vq->log_num, wiov.iov,
+			       wiov.used * sizeof(vq->log[0]));
+			vq->log_num += wiov.used;
+		}
 	}
 
-	if (unlikely((u16)(vq->avail_idx - last_avail_idx) > vq->num)) {
-		vq_err(vq, "Guest moved used index from %u to %u",
-		       last_avail_idx, vq->avail_idx);
-		return -EFAULT;
-	}
+	vringh_iov_cleanup(&riov);
+	vringh_iov_cleanup(&wiov);
 
-	/* If there's nothing new since last we looked, return invalid. */
-	if (vq->avail_idx == last_avail_idx)
-		return vq->num;
-
-	/* Only get avail ring entries after they have been exposed by guest. */
-	smp_rmb();
-
-	/* Grab the next descriptor number they're advertising, and increment
-	 * the index we've seen. */
-	if (unlikely(get_user(head,
-			      &vq->avail->ring[last_avail_idx % vq->num]))) {
-		vq_err(vq, "Failed to read head: idx %d address %p\n",
-		       last_avail_idx,
-		       &vq->avail->ring[last_avail_idx % vq->num]);
-		return -EFAULT;
-	}
-
-	/* If their number is silly, that's an error. */
-	if (unlikely(head >= vq->num)) {
-		vq_err(vq, "Guest says index %u > %u is available",
-		       head, vq->num);
-		return -EINVAL;
-	}
-
-	/* When we start there are none of either input nor output. */
-	*out_num = *in_num = 0;
-
-	i = head;
-	do {
-		unsigned iov_count = *in_num + *out_num;
-		if (unlikely(i >= vq->num)) {
-			vq_err(vq, "Desc index is %u > %u, head = %u",
-			       i, vq->num, head);
-			return -EINVAL;
-		}
-		if (unlikely(++found > vq->num)) {
-			vq_err(vq, "Loop detected: last one at %u "
-			       "vq size %u head %u\n",
-			       i, vq->num, head);
-			return -EINVAL;
-		}
-		ret = copy_from_user(&desc, vq->desc + i, sizeof desc);
-		if (unlikely(ret)) {
-			vq_err(vq, "Failed to get descriptor: idx %d addr %p\n",
-			       i, vq->desc + i);
-			return -EFAULT;
-		}
-		if (desc.flags & VRING_DESC_F_INDIRECT) {
-			ret = get_indirect(dev, vq, iov, iov_size,
-					   out_num, in_num, &desc);
-			if (unlikely(ret < 0)) {
-				vq_err(vq, "Failure detected "
-				       "in indirect descriptor at idx %d\n", i);
-				return ret;
-			}
-			continue;
-		}
-
-		ret = translate_desc(dev, desc.addr, desc.len, iov + iov_count,
-				     iov_size - iov_count);
-		if (unlikely(ret < 0)) {
-			vq_err(vq, "Translation failure %d descriptor idx %d\n",
-			       ret, i);
-			return ret;
-		}
-		if (desc.flags & VRING_DESC_F_WRITE) {
-			/* If this is an input descriptor,
-			 * increment that count. */
-			*in_num += ret;
-		} else {
-			/* If it's an output descriptor, they're all supposed
-			 * to come before any input descriptors. */
-			if (unlikely(*in_num)) {
-				vq_err(vq, "Descriptor has out after in: "
-				       "idx %d\n", i);
-				return -EINVAL;
-			}
-			*out_num += ret;
-		}
-	} while ((i = next_desc(&desc)) != -1);
-
-	/* On success, increment avail index. */
-	vq->last_avail_idx++;
-
-	/* Save writable iovec for data logging later. */
-	if (unlikely(vhost_has_feature(vq->dev, VHOST_F_LOG_ALL))) {
-		BUG_ON(*in_num + vq->log_num > UIO_MAXIOV);
-		memcpy(vq->log + vq->log_num, iov + *out_num,
-		       *in_num * sizeof(vq->log[0]));
-		vq->log_num += *in_num;
-	}
-
-	/* Assume notifications from guest are disabled at this point,
-	 * if they aren't we would need to update avail_event index. */
-	BUG_ON(!(vq->used_flags & VRING_USED_F_NO_NOTIFY));
-	return head;
+	return ret;
 }
 
 /* Reverse the effect of vhost_get_vq_desc. Useful for error handling. */
@@ -1206,68 +970,16 @@ void vhost_discard_vq_desc(struct vhost_virtqueue *vq, int n)
 {
 	/* Assume worst case, that they've written to descriptors. */
 	log_data(vq);
-	vq->last_avail_idx -= n;
+	vringh_abandon_user(&vq->vringh, n);
 }
 
 /* After we've used one of their buffers, we tell them about it.  We'll then
  * want to notify the guest, using eventfd. */
 int vhost_add_used(struct vhost_virtqueue *vq, unsigned int head, int len)
 {
-	struct vring_used_elem __user *used;
-
-	/* The virtqueue contains a ring of used buffers.  Get a pointer to the
-	 * next entry in that used ring. */
-	used = &vq->used->ring[vq->last_used_idx % vq->num];
-	if (put_user(head, &used->id)) {
-		vq_err(vq, "Failed to write used id");
-		return -EFAULT;
-	}
-	if (put_user(len, &used->len)) {
-		vq_err(vq, "Failed to write used len");
-		return -EFAULT;
-	}
-	/* Make sure buffer is written before we update index. */
-	smp_wmb();
-	if (put_user(vq->last_used_idx + 1, &vq->used->idx)) {
-		vq_err(vq, "Failed to increment used idx");
-		return -EFAULT;
-	}
+	int ret = vringh_complete_user(&vq->vringh, head, len);
 	log_used(vq);
-	log_data(vq);
-
-	vq->last_used_idx++;
-	/* If the driver never bothers to signal in a very long while,
-	 * used index might wrap around. If that happens, invalidate
-	 * signalled_used index we stored. TODO: make sure driver
-	 * signals at least once in 2^16 and remove this. */
-	if (unlikely(vq->last_used_idx == vq->signalled_used))
-		vq->signalled_used_valid = false;
-	return 0;
-}
-
-static int __vhost_add_used_n(struct vhost_virtqueue *vq,
-			    struct vring_used_elem *heads,
-			    unsigned count)
-{
-	struct vring_used_elem __user *used;
-	u16 old, new;
-	int start;
-
-	start = vq->last_used_idx % vq->num;
-	used = vq->used->ring + start;
-	if (copy_to_user(used, heads, count * sizeof *used)) {
-		vq_err(vq, "Failed to write used");
-		return -EFAULT;
-	}
-	old = vq->last_used_idx;
-	new = (vq->last_used_idx += count);
-	/* If the driver never bothers to signal in a very long while,
-	 * used index might wrap around. If that happens, invalidate
-	 * signalled_used index we stored. TODO: make sure driver
-	 * signals at least once in 2^16 and remove this. */
-	if (unlikely((u16)(new - vq->signalled_used) < (u16)(new - old)))
-		vq->signalled_used_valid = false;
-	return 0;
+	return ret;
 }
 
 /* After we've used one of their buffers, we tell them about it.  We'll then
@@ -1275,64 +987,20 @@ static int __vhost_add_used_n(struct vhost_virtqueue *vq,
 int vhost_add_used_n(struct vhost_virtqueue *vq, struct vring_used_elem *heads,
 		     unsigned count)
 {
-	int start, n, r;
+	int ret = vringh_complete_multi_user(&vq->vringh, heads, count);
 
-	start = vq->last_used_idx % vq->num;
-	n = vq->num - start;
-	if (n < count) {
-		r = __vhost_add_used_n(vq, heads, n);
-		if (r < 0)
-			return r;
-		heads += n;
-		count -= n;
-	}
-	r = __vhost_add_used_n(vq, heads, count);
-
-	/* Make sure buffer is written before we update index. */
-	smp_wmb();
-	if (put_user(vq->last_used_idx, &vq->used->idx)) {
-		vq_err(vq, "Failed to increment used idx");
-		return -EFAULT;
-	}
 	log_used(vq);
 	log_data(vq);
-	return r;
+	return ret;
 }
 
 static bool vhost_notify(struct vhost_dev *dev, struct vhost_virtqueue *vq)
 {
-	__u16 old, new, event;
-	bool v;
-	/* Flush out used index updates. This is paired
-	 * with the barrier that the Guest executes when enabling
-	 * interrupts. */
-	smp_mb();
+	int err = vringh_need_notify_user(&vq->vringh);
 
-	if (vhost_has_feature(dev, VIRTIO_F_NOTIFY_ON_EMPTY) &&
-	    unlikely(vq->avail_idx == vq->last_avail_idx))
-		return true;
-
-	if (!vhost_has_feature(dev, VIRTIO_RING_F_EVENT_IDX)) {
-		__u16 flags;
-		if (get_user(flags, &vq->avail->flags)) {
-			vq_err(vq, "Failed to get flags");
-			return true;
-		}
-		return !(flags & VRING_AVAIL_F_NO_INTERRUPT);
-	}
-	old = vq->signalled_used;
-	v = vq->signalled_used_valid;
-	new = vq->signalled_used = vq->last_used_idx;
-	vq->signalled_used_valid = true;
-
-	if (unlikely(!v))
-		return true;
-
-	if (get_user(event, vhost_used_event(vq))) {
-		vq_err(vq, "Failed to get used event idx");
-		return true;
-	}
-	return vring_need_event(event, new, old);
+	if (err == 0)
+		return false;
+	return true;
 }
 
 /* This actually signals the guest, using eventfd. */
@@ -1364,54 +1032,17 @@ void vhost_add_used_and_signal_n(struct vhost_dev *dev,
 /* OK, now we need to know about added descriptors. */
 bool vhost_enable_notify(struct vhost_dev *dev, struct vhost_virtqueue *vq)
 {
-	u16 avail_idx;
-	int r;
-
-	if (!(vq->used_flags & VRING_USED_F_NO_NOTIFY))
-		return false;
-	vq->used_flags &= ~VRING_USED_F_NO_NOTIFY;
-	if (!vhost_has_feature(dev, VIRTIO_RING_F_EVENT_IDX)) {
-		r = vhost_update_used_flags(vq);
-		if (r) {
-			vq_err(vq, "Failed to enable notification at %p: %d\n",
-			       &vq->used->flags, r);
-			return false;
-		}
-	} else {
-		r = vhost_update_avail_event(vq, vq->avail_idx);
-		if (r) {
-			vq_err(vq, "Failed to update avail event index at %p: %d\n",
-			       vhost_avail_event(vq), r);
-			return false;
-		}
-	}
-	/* They could have slipped one in as we were doing that: make
-	 * sure it's written, then check again. */
-	smp_mb();
-	r = get_user(avail_idx, &vq->avail->idx);
-	if (r) {
-		vq_err(vq, "Failed to check avail idx at %p: %d\n",
-		       &vq->avail->idx, r);
-		return false;
-	}
-
-	return avail_idx != vq->avail_idx;
+	bool ret = vringh_notify_enable_user(&vq->vringh);
+	log_used(vq);
+	/* FIXME: Our return value is backwards from everyone else! */
+	return !ret;
 }
 
 /* We don't need to be notified again. */
 void vhost_disable_notify(struct vhost_dev *dev, struct vhost_virtqueue *vq)
 {
-	int r;
-
-	if (vq->used_flags & VRING_USED_F_NO_NOTIFY)
-		return;
-	vq->used_flags |= VRING_USED_F_NO_NOTIFY;
-	if (!vhost_has_feature(dev, VIRTIO_RING_F_EVENT_IDX)) {
-		r = vhost_update_used_flags(vq);
-		if (r)
-			vq_err(vq, "Failed to enable notification at %p: %d\n",
-			       &vq->used->flags, r);
-	}
+	vringh_notify_disable_user(&vq->vringh);
+	log_used(vq);
 }
 
 static void vhost_zerocopy_done_signal(struct kref *kref)
