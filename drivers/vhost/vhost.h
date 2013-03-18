@@ -11,6 +11,7 @@
 #include <linux/virtio_config.h>
 #include <linux/virtio_ring.h>
 #include <linux/atomic.h>
+#include <linux/vringh.h>
 
 struct vhost_device;
 
@@ -47,11 +48,6 @@ void vhost_poll_stop(struct vhost_poll *poll);
 void vhost_poll_flush(struct vhost_poll *poll);
 void vhost_poll_queue(struct vhost_poll *poll);
 
-struct vhost_log {
-	u64 addr;
-	u64 len;
-};
-
 struct vhost_virtqueue;
 
 struct vhost_ubuf_ref {
@@ -72,10 +68,7 @@ struct vhost_virtqueue {
 
 	/* The actual ring of buffers. */
 	struct mutex mutex;
-	unsigned int num;
-	struct vring_desc __user *desc;
-	struct vring_avail __user *avail;
-	struct vring_used __user *used;
+	struct vringh vringh;
 	struct file *kick;
 	struct file *call;
 	struct file *error;
@@ -88,24 +81,6 @@ struct vhost_virtqueue {
 	/* The routine to call when the Guest pings us, or timeout. */
 	vhost_work_fn_t handle_kick;
 
-	/* Last available index we saw. */
-	u16 last_avail_idx;
-
-	/* Caches available index value from user. */
-	u16 avail_idx;
-
-	/* Last index we used. */
-	u16 last_used_idx;
-
-	/* Used flags */
-	u16 used_flags;
-
-	/* Last used index value we have signalled on */
-	u16 signalled_used;
-
-	/* Last used index value we have signalled on */
-	bool signalled_used_valid;
-
 	/* Log writes to used structure. */
 	bool log_used;
 	u64 log_addr;
@@ -115,7 +90,6 @@ struct vhost_virtqueue {
 	 * Since each iovec has >= 1 byte length, we never need more than
 	 * header length entries to store the header. */
 	struct iovec hdr[sizeof(struct virtio_net_hdr_mrg_rxbuf)];
-	struct iovec *indirect;
 	size_t vhost_hlen;
 	size_t sock_hlen;
 	struct vring_used_elem *heads;
@@ -129,7 +103,11 @@ struct vhost_virtqueue {
 	void __rcu *private_data;
 	/* Log write descriptors */
 	void __user *log_base;
-	struct vhost_log *log;
+
+	/* If we're logging writes. */
+	struct iovec *log;
+	unsigned int log_num;
+
 	/* vhost zerocopy support fields below: */
 	/* last used idx for outstanding DMA zerocopy buffers */
 	int upend_idx;
@@ -166,14 +144,18 @@ void vhost_dev_cleanup(struct vhost_dev *, bool locked);
 void vhost_dev_stop(struct vhost_dev *);
 long vhost_dev_ioctl(struct vhost_dev *, unsigned int ioctl, void __user *argp);
 long vhost_vring_ioctl(struct vhost_dev *d, int ioctl, void __user *argp);
-int vhost_vq_access_ok(struct vhost_virtqueue *vq);
-int vhost_log_access_ok(struct vhost_dev *);
 
 int vhost_get_vq_desc(struct vhost_dev *, struct vhost_virtqueue *,
 		      struct iovec iov[], unsigned int iov_count,
-		      unsigned int *out_num, unsigned int *in_num,
-		      struct vhost_log *log, unsigned int *log_num);
+		      unsigned int *out_num, unsigned int *in_num);
+int vhost_getdesc(struct vhost_dev *dev, struct vhost_virtqueue *vq,
+		  struct vringh_iov *riov,
+		  struct vringh_iov *wiov,
+		  u16 *head);
 void vhost_discard_vq_desc(struct vhost_virtqueue *, int n);
+
+int vhost_log_iov(struct vhost_virtqueue *vq,
+		  const struct iovec iov[], unsigned int iov_count);
 
 int vhost_init_used(struct vhost_virtqueue *);
 int vhost_add_used(struct vhost_virtqueue *, unsigned int head, int len);
@@ -186,9 +168,6 @@ void vhost_add_used_and_signal_n(struct vhost_dev *, struct vhost_virtqueue *,
 void vhost_signal(struct vhost_dev *, struct vhost_virtqueue *);
 void vhost_disable_notify(struct vhost_dev *, struct vhost_virtqueue *);
 bool vhost_enable_notify(struct vhost_dev *, struct vhost_virtqueue *);
-
-int vhost_log_write(struct vhost_virtqueue *vq, struct vhost_log *log,
-		    unsigned int log_num, u64 len);
 
 #define vq_err(vq, fmt, ...) do {                                  \
 		pr_debug(pr_fmt(fmt), ##__VA_ARGS__);       \

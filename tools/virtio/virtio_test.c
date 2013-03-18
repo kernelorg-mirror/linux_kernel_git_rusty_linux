@@ -10,10 +10,14 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <fcntl.h>
+#include <stdbool.h>
 #include <linux/vhost.h>
 #include <linux/virtio.h>
 #include <linux/virtio_ring.h>
 #include "../../drivers/vhost/test.h"
+
+/* Unused */
+void *__kmalloc_fake, *__kfree_ignore_start, *__kfree_ignore_end;
 
 struct vq_info {
 	int kick;
@@ -92,7 +96,8 @@ static void vq_info_add(struct vdev_info *dev, int num)
 	assert(r >= 0);
 	memset(info->ring, 0, vring_size(num, 4096));
 	vring_init(&info->vring, num, info->ring, 4096);
-	info->vq = vring_new_virtqueue(info->vring.num, 4096, &dev->vdev,
+	info->vq = vring_new_virtqueue(info->idx,
+				       info->vring.num, 4096, &dev->vdev,
 				       true, info->ring,
 				       vq_notify, vq_callback, "test");
 	assert(info->vq);

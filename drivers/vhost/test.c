@@ -54,14 +54,13 @@ static void handle_vq(struct vhost_test *n)
 	for (;;) {
 		head = vhost_get_vq_desc(&n->dev, vq, vq->iov,
 					 ARRAY_SIZE(vq->iov),
-					 &out, &in,
-					 NULL, NULL);
+					 &out, &in);
 		/* On error, stop handling until the next kick. */
 		if (unlikely(head < 0))
 			break;
 		/* Nothing new?  Wait for eventfd to tell us they refilled. */
-		if (head == vq->num) {
-			if (unlikely(vhost_enable_notify(&n->dev, vq))) {
+		if (head == vq->vringh.vring.num) {
+			if (unlikely(!vhost_enable_notify(&n->dev, vq))) {
 				vhost_disable_notify(&n->dev, vq);
 				continue;
 			}
@@ -178,14 +177,6 @@ static long vhost_test_run(struct vhost_test *n, int test)
 		goto err;
 
 	for (index = 0; index < n->dev.nvqs; ++index) {
-		/* Verify that ring has been setup correctly. */
-		if (!vhost_vq_access_ok(&n->vqs[index])) {
-			r = -EFAULT;
-			goto err;
-		}
-	}
-
-	for (index = 0; index < n->dev.nvqs; ++index) {
 		vq = n->vqs + index;
 		mutex_lock(&vq->mutex);
 		priv = test ? n : NULL;
@@ -234,11 +225,6 @@ done:
 static int vhost_test_set_features(struct vhost_test *n, u64 features)
 {
 	mutex_lock(&n->dev.mutex);
-	if ((features & (1 << VHOST_F_LOG_ALL)) &&
-	    !vhost_log_access_ok(&n->dev)) {
-		mutex_unlock(&n->dev.mutex);
-		return -EFAULT;
-	}
 	n->dev.acked_features = features;
 	smp_wmb();
 	vhost_test_flush(n);
@@ -275,7 +261,9 @@ static long vhost_test_ioctl(struct file *f, unsigned int ioctl,
 		return vhost_test_reset_owner(n);
 	default:
 		mutex_lock(&n->dev.mutex);
-		r = vhost_dev_ioctl(&n->dev, ioctl, arg);
+		r = vhost_dev_ioctl(&n->dev, ioctl, argp);
+                if (r == -ENOIOCTLCMD)
+                        r = vhost_vring_ioctl(&n->dev, ioctl, argp);
 		vhost_test_flush(n);
 		mutex_unlock(&n->dev.mutex);
 		return r;

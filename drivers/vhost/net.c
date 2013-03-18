@@ -226,19 +226,32 @@ static void vhost_zerocopy_callback(struct ubuf_info *ubuf, bool success)
 	vhost_ubuf_put(ubufs);
 }
 
+static size_t discard_data(struct vringh_iov *iov, size_t len)
+{
+	size_t done = 0;
+
+	while (len && iov->i < iov->used) {
+		size_t partlen;
+
+		partlen = min(iov->iov[iov->i].iov_len, len);
+		vringh_iov_consume(iov, partlen);
+		done += partlen;
+		len -= partlen;
+	}
+	return done;
+}	
+
 /* Expects to be always run from workqueue - which acts as
  * read-size critical section for our kind of RCU. */
 static void handle_tx(struct vhost_net *net)
 {
 	struct vhost_virtqueue *vq = &net->dev.vqs[VHOST_NET_VQ_TX];
-	unsigned out, in, s;
-	int head;
+	u16 head;
 	struct msghdr msg = {
 		.msg_name = NULL,
 		.msg_namelen = 0,
 		.msg_control = NULL,
 		.msg_controllen = 0,
-		.msg_iov = vq->iov,
 		.msg_flags = MSG_DONTWAIT,
 	};
 	size_t len, total_len = 0;
@@ -247,6 +260,8 @@ static void handle_tx(struct vhost_net *net)
 	struct socket *sock;
 	struct vhost_ubuf_ref *uninitialized_var(ubufs);
 	bool zcopy, zcopy_used;
+	struct iovec iov[1 + MAX_SKB_FRAGS];
+	struct vringh_iov riov;
 
 	/* TODO: check that we are running from vhost_worker? */
 	sock = rcu_dereference_check(vq->private_data, 1);
@@ -269,20 +284,21 @@ static void handle_tx(struct vhost_net *net)
 	hdr_size = vq->vhost_hlen;
 	zcopy = vq->ubufs;
 
+	vringh_iov_init(&riov, iov, ARRAY_SIZE(iov));
+
 	for (;;) {
 		/* Release DMAs done buffers first */
 		if (zcopy)
 			vhost_zerocopy_signal_used(net, vq);
 
-		head = vhost_get_vq_desc(&net->dev, vq, vq->iov,
-					 ARRAY_SIZE(vq->iov),
-					 &out, &in,
-					 NULL, NULL);
+		err = vhost_getdesc(&net->dev, vq, &riov, NULL, &head);
+
 		/* On error, stop handling until the next kick. */
-		if (unlikely(head < 0))
+		if (unlikely(err < 0))
 			break;
+
 		/* Nothing new?  Wait for eventfd to tell us they refilled. */
-		if (head == vq->num) {
+		if (err == 0) {
 			int num_pends;
 
 			wmem = atomic_read(&sock->sk->sk_wmem_alloc);
@@ -302,28 +318,23 @@ static void handle_tx(struct vhost_net *net)
 				set_bit(SOCK_ASYNC_NOSPACE, &sock->flags);
 				break;
 			}
-			if (unlikely(vhost_enable_notify(&net->dev, vq))) {
+			if (unlikely(!vhost_enable_notify(&net->dev, vq))) {
 				vhost_disable_notify(&net->dev, vq);
 				continue;
 			}
 			break;
 		}
-		if (in) {
-			vq_err(vq, "Unexpected descriptor format for TX: "
-			       "out %d, int %d\n", out, in);
-			break;
-		}
+
 		/* Skip header. TODO: support TSO. */
-		s = move_iovec_hdr(vq->iov, vq->hdr, hdr_size, out);
-		msg.msg_iovlen = out;
-		len = iov_length(vq->iov, out);
-		/* Sanity check */
-		if (!len) {
-			vq_err(vq, "Unexpected header len for TX: "
-			       "%zd expected %zd\n",
-			       iov_length(vq->hdr, s), hdr_size);
+		if (discard_data(&riov, hdr_size) < hdr_size) {
+			vq_err(vq, "Unexpected len for TX: "
+			       "%zd expected >= %zd\n", len, hdr_size);
 			break;
 		}
+
+		len = iov_length(riov.iov + riov.i, riov.used - riov.i);
+		msg.msg_iov = riov.iov + riov.i;
+		msg.msg_iovlen = riov.used - riov.i;
 		zcopy_used = zcopy && (len >= VHOST_GOODCOPY_LEN ||
 				       vq->upend_idx != vq->done_idx);
 
@@ -381,6 +392,7 @@ static void handle_tx(struct vhost_net *net)
 			break;
 		}
 	}
+	vringh_iov_cleanup(&riov);
 
 	mutex_unlock(&vq->mutex);
 }
@@ -403,62 +415,63 @@ static int peek_head_len(struct sock *sk)
 	return len;
 }
 
-/* This is a multi-buffer version of vhost_get_desc, that works if
- *	vq has read descriptors only.
- * @vq		- the relevant virtqueue
- * @datalen	- data length we'll be reading
- * @iovcount	- returned count of io vectors we fill
- * @log		- vhost log
- * @log_num	- log offset
- * @quota       - headcount quota, 1 for big buffer
- *	returns number of buffer heads allocated, negative on error
- */
-static int get_rx_bufs(struct vhost_virtqueue *vq,
-		       struct vring_used_elem *heads,
-		       int datalen,
-		       unsigned *iovcount,
-		       struct vhost_log *log,
-		       unsigned *log_num,
-		       unsigned int quota)
+/* Get a single rx buffer from the guest.  An error if it's too small. */
+static int get_single_rxbuf(struct vhost_virtqueue *vq,
+			    struct vring_used_elem *head,
+			    size_t vhost_len,
+			    struct vringh_iov *wiov)
 {
-	unsigned int out, in;
-	int seg = 0;
-	int headcount = 0;
-	unsigned d;
-	int r, nlogs = 0;
+	int err;
+	u16 h;
 
-	while (datalen > 0 && headcount < quota) {
-		if (unlikely(seg >= UIO_MAXIOV)) {
+	err = vhost_getdesc(vq->dev, vq, NULL, wiov, &h);
+	if (err <= 0)
+		return err;
+
+	head->id = h;
+	head->len = iov_length(wiov->iov, wiov->used);
+	if (unlikely(head->len < vhost_len)) {
+		vq_err(vq, "unexpected descriptor length for RX: %u < %zu \n",
+		       head->len, vhost_len);
+		goto err;
+	}
+	return 1;
+
+err:
+	vhost_discard_vq_desc(vq, 1);
+	return -EINVAL;
+}
+
+/* Get a multiple rx buffer(s) from the guest for merging. */
+static int get_multi_rxbuf(struct vhost_virtqueue *vq,
+			    struct vring_used_elem *heads,
+			    size_t vhost_len,
+			    struct vringh_iov *wiov)
+{
+	int headcount = 0;
+	int r;
+
+	while (vhost_len > 0) {
+		u16 head;
+		unsigned int old_used = wiov->used;
+
+		/* Too many segments? */
+		if (headcount == UIO_MAXIOV) {
+			vq_err(vq, "%u rx buffers, still need %zu bytes\n",
+			       headcount, vhost_len);
 			r = -ENOBUFS;
 			goto err;
 		}
-		d = vhost_get_vq_desc(vq->dev, vq, vq->iov + seg,
-				      ARRAY_SIZE(vq->iov) - seg, &out,
-				      &in, log, log_num);
-		if (d == vq->num) {
-			r = 0;
+
+		r = vhost_getdesc(vq->dev, vq, NULL, wiov, &head);
+		if (r <= 0)
 			goto err;
-		}
-		if (unlikely(out || in <= 0)) {
-			vq_err(vq, "unexpected descriptor format for RX: "
-				"out %d, in %d\n", out, in);
-			r = -EINVAL;
-			goto err;
-		}
-		if (unlikely(log)) {
-			nlogs += *log_num;
-			log += *log_num;
-		}
-		heads[headcount].id = d;
-		heads[headcount].len = iov_length(vq->iov + seg, in);
-		datalen -= heads[headcount].len;
+		heads[headcount].id = head;
+		heads[headcount].len = iov_length(wiov->iov + old_used,
+						  wiov->used - old_used);
+		vhost_len -= heads[headcount].len;
 		++headcount;
-		seg += in;
 	}
-	heads[headcount - 1].len += datalen;
-	*iovcount = seg;
-	if (unlikely(log))
-		*log_num = nlogs;
 	return headcount;
 err:
 	vhost_discard_vq_desc(vq, headcount);
@@ -470,8 +483,6 @@ err:
 static void handle_rx(struct vhost_net *net)
 {
 	struct vhost_virtqueue *vq = &net->dev.vqs[VHOST_NET_VQ_RX];
-	unsigned uninitialized_var(in), log;
-	struct vhost_log *vq_log;
 	struct msghdr msg = {
 		.msg_name = NULL,
 		.msg_namelen = 0,
@@ -491,6 +502,7 @@ static void handle_rx(struct vhost_net *net)
 	size_t vhost_len, sock_len;
 	/* TODO: check that we are running from vhost_worker? */
 	struct socket *sock = rcu_dereference_check(vq->private_data, 1);
+	struct vringh_iov wiov;
 
 	if (!sock)
 		return;
@@ -500,22 +512,29 @@ static void handle_rx(struct vhost_net *net)
 	vhost_hlen = vq->vhost_hlen;
 	sock_hlen = vq->sock_hlen;
 
-	vq_log = unlikely(vhost_has_feature(&net->dev, VHOST_F_LOG_ALL)) ?
-		vq->log : NULL;
 	mergeable = vhost_has_feature(&net->dev, VIRTIO_NET_F_MRG_RXBUF);
+	vringh_iov_init(&wiov, vq->iov, UIO_MAXIOV);
 
 	while ((sock_len = peek_head_len(sock->sk))) {
 		sock_len += sock_hlen;
 		vhost_len = sock_len + vhost_hlen;
-		headcount = get_rx_bufs(vq, vq->heads, vhost_len,
-					&in, vq_log, &log,
-					likely(mergeable) ? UIO_MAXIOV : 1);
+
+		wiov.used = 0;
+		vringh_iov_reset(&wiov);
+
+		if (likely(mergeable))
+			err = get_multi_rxbuf(vq, vq->heads, vhost_len, &wiov);
+		else
+			err = get_single_rxbuf(vq, vq->heads, vhost_len, &wiov);
+
 		/* On error, stop handling until the next kick. */
-		if (unlikely(headcount < 0))
+		if (unlikely(err < 0))
 			break;
+
+		headcount = err;
 		/* OK, now we need to know about added descriptors. */
 		if (!headcount) {
-			if (unlikely(vhost_enable_notify(&net->dev, vq))) {
+			if (unlikely(!vhost_enable_notify(&net->dev, vq))) {
 				/* They have slipped one in as we were
 				 * doing that: check again. */
 				vhost_disable_notify(&net->dev, vq);
@@ -528,12 +547,12 @@ static void handle_rx(struct vhost_net *net)
 		/* We don't need to be notified again. */
 		if (unlikely((vhost_hlen)))
 			/* Skip header. TODO: support TSO. */
-			move_iovec_hdr(vq->iov, vq->hdr, vhost_hlen, in);
+			move_iovec_hdr(vq->iov, vq->hdr, vhost_hlen, wiov.used);
 		else
 			/* Copy the header for use in VIRTIO_NET_F_MRG_RXBUF:
 			 * needed because recvmsg can modify msg_iov. */
-			copy_iovec_hdr(vq->iov, vq->hdr, sock_hlen, in);
-		msg.msg_iovlen = in;
+			copy_iovec_hdr(vq->iov, vq->hdr, sock_hlen, wiov.used);
+		msg.msg_iovlen = wiov.used;
 		err = sock->ops->recvmsg(NULL, sock, &msg,
 					 sock_len, MSG_DONTWAIT | MSG_TRUNC);
 		/* Userspace might have consumed the packet meanwhile:
@@ -563,8 +582,7 @@ static void handle_rx(struct vhost_net *net)
 		}
 		vhost_add_used_and_signal_n(&net->dev, vq, vq->heads,
 					    headcount);
-		if (unlikely(vq_log))
-			vhost_log_write(vq, vq_log, log, vhost_len);
+
 		total_len += vhost_len;
 		if (unlikely(total_len >= VHOST_NET_WEIGHT)) {
 			vhost_poll_queue(&vq->poll);
@@ -573,6 +591,7 @@ static void handle_rx(struct vhost_net *net)
 	}
 
 	mutex_unlock(&vq->mutex);
+	vringh_iov_cleanup(&wiov);
 }
 
 static void handle_tx_kick(struct vhost_work *work)
@@ -814,11 +833,6 @@ static long vhost_net_set_backend(struct vhost_net *n, unsigned index, int fd)
 	vq = n->vqs + index;
 	mutex_lock(&vq->mutex);
 
-	/* Verify that ring has been setup correctly. */
-	if (!vhost_vq_access_ok(vq)) {
-		r = -EFAULT;
-		goto err_vq;
-	}
 	sock = get_socket(fd);
 	if (IS_ERR(sock)) {
 		r = PTR_ERR(sock);
@@ -923,11 +937,6 @@ static int vhost_net_set_features(struct vhost_net *n, u64 features)
 		sock_hlen = hdr_len;
 	}
 	mutex_lock(&n->dev.mutex);
-	if ((features & (1 << VHOST_F_LOG_ALL)) &&
-	    !vhost_log_access_ok(&n->dev)) {
-		mutex_unlock(&n->dev.mutex);
-		return -EFAULT;
-	}
 	n->dev.acked_features = features;
 	smp_wmb();
 	for (i = 0; i < VHOST_NET_VQ_MAX; ++i) {
