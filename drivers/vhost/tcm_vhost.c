@@ -598,7 +598,7 @@ static void vhost_scsi_handle_vq(struct vhost_scsi *vs,
 			break;
 		/* Nothing new?  Wait for eventfd to tell us they refilled. */
 		if (head == vq->vringh.vring.num) {
-			if (unlikely(vhost_enable_notify(&vs->dev, vq))) {
+			if (unlikely(!vhost_enable_notify(&vs->dev, vq))) {
 				vhost_disable_notify(&vs->dev, vq);
 				continue;
 			}

@@ -301,7 +301,7 @@ static void handle_tx(struct vhost_net *net)
 				set_bit(SOCK_ASYNC_NOSPACE, &sock->flags);
 				break;
 			}
-			if (unlikely(vhost_enable_notify(&net->dev, vq))) {
+			if (unlikely(!vhost_enable_notify(&net->dev, vq))) {
 				vhost_disable_notify(&net->dev, vq);
 				continue;
 			}
@@ -500,7 +500,7 @@ static void handle_rx(struct vhost_net *net)
 			break;
 		/* OK, now we need to know about added descriptors. */
 		if (!headcount) {
-			if (unlikely(vhost_enable_notify(&net->dev, vq))) {
+			if (unlikely(!vhost_enable_notify(&net->dev, vq))) {
 				/* They have slipped one in as we were
 				 * doing that: check again. */
 				vhost_disable_notify(&net->dev, vq);

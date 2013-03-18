@@ -60,7 +60,7 @@ static void handle_vq(struct vhost_test *n)
 			break;
 		/* Nothing new?  Wait for eventfd to tell us they refilled. */
 		if (head == vq->vringh.vring.num) {
-			if (unlikely(vhost_enable_notify(&n->dev, vq))) {
+			if (unlikely(!vhost_enable_notify(&n->dev, vq))) {
 				vhost_disable_notify(&n->dev, vq);
 				continue;
 			}

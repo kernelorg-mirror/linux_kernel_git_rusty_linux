@@ -1034,8 +1034,7 @@ bool vhost_enable_notify(struct vhost_dev *dev, struct vhost_virtqueue *vq)
 {
 	bool ret = vringh_notify_enable_user(&vq->vringh);
 	log_used(vq);
-	/* FIXME: Our return value is backwards from everyone else! */
-	return !ret;
+	return ret;
 }
 
 /* We don't need to be notified again. */
