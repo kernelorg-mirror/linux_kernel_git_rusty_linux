@@ -15,7 +15,6 @@
 #include <linux/interrupt.h>
 #include <linux/netdevice.h>
 #include <linux/rtnetlink.h>
-#include <linux/remoteproc.h>
 #include <linux/virtio_ids.h>
 #include <linux/virtio_caif.h>
 #include <linux/virtio_ring.h>
