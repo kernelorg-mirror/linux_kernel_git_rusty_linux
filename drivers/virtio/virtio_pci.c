@@ -182,12 +182,12 @@ static void *alloc_virtqueue_pages(u16 *num)
 	return NULL;
 }
 
-static struct virtqueue *setup_vq(struct virtio_device *vdev, unsigned index,
+static struct virtqueue *setup_vq(struct virtio_pci_device *vp_dev,
+				  unsigned index,
 				  void (*callback)(struct virtqueue *vq),
 				  const char *name,
 				  u16 msix_vec)
 {
-	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
 	struct virtio_pci_vq_info *info;
 	struct virtqueue *vq;
 	u16 num, off;
@@ -243,7 +243,7 @@ static struct virtqueue *setup_vq(struct virtio_device *vdev, unsigned index,
 	}
 
 	/* create the vring */
-	vq = vring_new_virtqueue(index, num, SMP_CACHE_BYTES, vdev,
+	vq = vring_new_virtqueue(index, num, SMP_CACHE_BYTES, &vp_dev->vdev,
 				 true, info->queue, virtio_pci_notify,
 				 callback, name);
 	if (!vq) {
@@ -355,7 +355,7 @@ static void del_vq(struct virtqueue *vq)
 static void vp_del_vqs(struct virtio_device *vdev)
 {
 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
-	virtio_pci_del_vqs(vdev, &vp_dev->common->msix_config, del_vq);
+	virtio_pci_del_vqs(vp_dev, &vp_dev->common->msix_config, del_vq);
 }
 
 /* the config->find_vqs() implementation */
@@ -366,7 +366,7 @@ static int vp_find_vqs(struct virtio_device *vdev, unsigned nvqs,
 {
 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
 
-	return virtio_pci_find_vqs(vdev, nvqs, vqs, callbacks, names,
+	return virtio_pci_find_vqs(vp_dev, nvqs, vqs, callbacks, names,
 				   &vp_dev->common->msix_config,
 				   setup_vq, del_vq);
 }

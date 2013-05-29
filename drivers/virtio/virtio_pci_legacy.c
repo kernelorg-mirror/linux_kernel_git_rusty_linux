@@ -112,13 +112,12 @@ static void vp_reset(struct virtio_device *vdev)
 	virtio_pci_synchronize_vectors(vdev);
 }
 
-static struct virtqueue *setup_legacy_vq(struct virtio_device *vdev,
+static struct virtqueue *setup_legacy_vq(struct virtio_pci_device *vp_dev,
 					 unsigned index,
 					 void (*callback)(struct virtqueue *vq),
 					 const char *name,
 					 u16 msix_vec)
 {
-	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
 	struct virtio_pci_vq_info *info;
 	struct virtqueue *vq;
 	unsigned long flags, size;
@@ -154,7 +153,7 @@ static struct virtqueue *setup_legacy_vq(struct virtio_device *vdev,
 
 	/* create the vring */
 	vq = vring_new_virtqueue(index, num,
-				 VIRTIO_PCI_LEGACY_VRING_ALIGN, vdev,
+				 VIRTIO_PCI_LEGACY_VRING_ALIGN, &vp_dev->vdev,
 				 true, info->queue, virtio_pci_notify,
 				 callback, name);
 	if (!vq) {
@@ -232,7 +231,7 @@ static void vp_del_vqs(struct virtio_device *vdev)
 {
 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
 
-	virtio_pci_del_vqs(vdev, vp_dev->legacy +
+	virtio_pci_del_vqs(vp_dev, vp_dev->legacy +
 			   VIRTIO_MSI_LEGACY_CONFIG_VECTOR,
 			   del_legacy_vq);
 }
@@ -245,7 +244,7 @@ static int vp_find_vqs(struct virtio_device *vdev, unsigned nvqs,
 {
 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
 
-	return virtio_pci_find_vqs(vdev, nvqs, vqs, callbacks, names,
+	return virtio_pci_find_vqs(vp_dev, nvqs, vqs, callbacks, names,
 				   vp_dev->legacy +
 				   VIRTIO_MSI_LEGACY_CONFIG_VECTOR,
 				   setup_legacy_vq, del_legacy_vq);
