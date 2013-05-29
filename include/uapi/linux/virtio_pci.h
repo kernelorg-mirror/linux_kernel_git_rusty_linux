@@ -128,7 +128,6 @@ struct virtio_pci_cap {
 	u8 cap_vndr;	/* Generic PCI field: PCI_CAP_ID_VNDR */
 	u8 cap_next;	/* Generic PCI field: next ptr. */
 	u8 cfg_type;	/* One of the VIRTIO_PCI_CAP_*_CFG. */
-/* FIXME: Should we use a bir, instead of raw bar number? */
 	u8 bar;		/* Where to find it. */
 	__le32 offset;	/* Offset within bar. */
 	__le32 length;	/* Length. */
@@ -142,14 +141,18 @@ struct virtio_pci_common_cfg {
 	__le32 guest_feature_select;	/* read-write */
 	__le32 guest_feature;		/* read-only */
 	__le16 msix_config;		/* read-write */
+	__le16 num_queues;		/* read-only */
 	__u8 device_status;		/* read-write */
-	__u8 unused;
+	__u8 unused1;
+	__le16 unused2;
 
 	/* About a specific virtqueue. */
 	__le16 queue_select;	/* read-write */
-	__le16 queue_align;	/* read-write, power of 2. */
 	__le16 queue_size;	/* read-write, power of 2. */
 	__le16 queue_msix_vector;/* read-write */
-	__le64 queue_address;	/* read-write: 0xFFFFFFFFFFFFFFFF == DNE. */
+	__le16 queue_enable;	/* read-write */
+	__le64 queue_desc;	/* read-write */
+	__le64 queue_avail;	/* read-write */
+	__le64 queue_used;	/* read-write */
 };
 #endif /* _UAPI_LINUX_VIRTIO_PCI_H */

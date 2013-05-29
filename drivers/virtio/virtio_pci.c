@@ -457,13 +457,14 @@ static struct virtqueue *setup_vq(struct virtio_device *vdev, unsigned index,
 	u16 num;
 	int err;
 
+	if (index >= ioread16(&vp_dev->common->num_queues))
+		return ERR_PTR(-ENOENT);
+
 	/* Select the queue we're interested in */
 	iowrite16(index, &vp_dev->common->queue_select);
 
-	switch (ioread64_twopart(&vp_dev->common->queue_address)) {
-	case 0xFFFFFFFFFFFFFFFFULL:
-		return ERR_PTR(-ENOENT);
-	case 0:
+	/* Sanity check */
+	switch (ioread64_twopart(&vp_dev->common->queue_desc)) {
 		/* Uninitialized.  Excellent. */
 		break;
 	default:
@@ -522,10 +523,14 @@ static struct virtqueue *setup_vq(struct virtio_device *vdev, unsigned index,
 	}
 
 	/* Activate the queue. */
-	iowrite64_twopart(virt_to_phys(info->queue),
-			  &vp_dev->common->queue_address);
-	iowrite16(SMP_CACHE_BYTES, &vp_dev->common->queue_align);
 	iowrite16(num, &vp_dev->common->queue_size);
+	iowrite64_twopart(virt_to_phys(vq->vring.desc),
+			  &vp_dev->common->queue_desc);
+	iowrite64_twopart(virt_to_phys(vq->vring.avail),
+			  &vp_dev->common->queue_avail);
+	iowrite64_twopart(virt_to_phys(vq->vring.used),
+			  &vp_dev->common->queue_used);
+	iowrite8(1, &vp_dev->common->queue_enable);
 
 	return vq;
 
@@ -538,6 +543,29 @@ out_info:
 	return ERR_PTR(err);
 }
 
+static void vp_vq_disable(struct virtio_pci_device *vp_dev,
+			  struct virtqueue *vq)
+{
+	unsigned long end;
+
+	/* Select the queue */
+	iowrite16(vq->index, &vp_dev->common->queue_select);
+
+	/* Disable it */
+ 	iowrite16(0, &vp_dev->common->queue_enable);
+
+	/* It's almost certainly synchronous, but just in case. */
+	end = jiffies + HZ/2;
+	while (ioread16(&vp_dev->common->queue_enable) != 0) {
+		if (time_after(jiffies, end)) {
+			dev_warn(&vp_dev->pci_dev->dev,
+				 "virtio_pci: disable ignored\n");
+			break;
+		}
+		cpu_relax();
+	}
+}
+
 static void vp_del_vq(struct virtqueue *vq)
 {
 	struct virtio_pci_device *vp_dev = to_vp_device(vq->vdev);
@@ -548,7 +576,10 @@ static void vp_del_vq(struct virtqueue *vq)
 	list_del(&info->node);
 	spin_unlock_irqrestore(&vp_dev->lock, flags);
 
-	/* Select and deactivate the queue */
+	/* It should be quiescent, but disable first just in case. */
+	vp_vq_disable(vp_dev, vq);
+
+	/* Select the queue */
 	iowrite16(vq->index, &vp_dev->common->queue_select);
 
 	if (vp_dev->msix_enabled) {
@@ -561,9 +592,10 @@ static void vp_del_vq(struct virtqueue *vq)
 	vring_del_virtqueue(vq);
 
 	/* This is for our own benefit, not the device's! */
-	iowrite64_twopart(0, &vp_dev->common->queue_address);
 	iowrite16(0, &vp_dev->common->queue_size);
-	iowrite16(0, &vp_dev->common->queue_align);
+	iowrite64_twopart(0, &vp_dev->common->queue_desc);
+	iowrite64_twopart(0, &vp_dev->common->queue_avail);
+	iowrite64_twopart(0, &vp_dev->common->queue_used);
 
 	free_pages_exact(info->queue, size);
 	kfree(info);
