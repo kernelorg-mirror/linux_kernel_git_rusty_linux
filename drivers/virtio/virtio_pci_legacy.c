@@ -690,7 +690,8 @@ static int virtio_pci_probe(struct pci_dev *pci_dev,
 	}
 
 	/* We leave modern virtio-pci for the modern driver. */
-	cap = virtio_pci_find_capability(pci_dev, VIRTIO_PCI_CAP_COMMON_CFG);
+	cap = virtio_pci_find_capability(pci_dev, VIRTIO_PCI_CAP_COMMON_CFG,
+					 IORESOURCE_IO|IORESOURCE_MEM);
 	if (cap) {
 		if (force_nonlegacy)
 			dev_info(&pci_dev->dev,
