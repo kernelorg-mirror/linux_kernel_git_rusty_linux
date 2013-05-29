@@ -26,6 +26,10 @@
 #include <linux/highmem.h>
 #include <linux/spinlock.h>
 
+static bool force_nonlegacy;
+module_param(force_nonlegacy, bool, 0644);
+MODULE_PARM_DESC(force_nonlegacy, "Take over non-legacy virtio devices too");
+
 MODULE_AUTHOR("Anthony Liguori <aliguori@us.ibm.com>");
 MODULE_DESCRIPTION("virtio-pci-legacy");
 MODULE_LICENSE("GPL");
@@ -673,7 +677,7 @@ static int virtio_pci_probe(struct pci_dev *pci_dev,
 			    const struct pci_device_id *id)
 {
 	struct virtio_pci_device *vp_dev;
-	int err;
+	int err, cap;
 
 	/* We only own devices >= 0x1000 and <= 0x103f: leave the rest. */
 	if (pci_dev->device < 0x1000 || pci_dev->device > 0x103f)
@@ -683,6 +687,20 @@ static int virtio_pci_probe(struct pci_dev *pci_dev,
 		printk(KERN_ERR "virtio_pci_legacy: expected ABI version %d, got %d\n",
 		       VIRTIO_PCI_ABI_VERSION, pci_dev->revision);
 		return -ENODEV;
+	}
+
+	/* We leave modern virtio-pci for the modern driver. */
+	cap = virtio_pci_find_capability(pci_dev, VIRTIO_PCI_CAP_COMMON_CFG);
+	if (cap) {
+		if (force_nonlegacy)
+			dev_info(&pci_dev->dev,
+				 "virtio_pci_legacy: forcing legacy mode!\n");
+		else {
+			dev_info(&pci_dev->dev,
+				 "virtio_pci_legacy: leaving to"
+				 " non-legacy driver\n");
+			return -ENODEV;
+		}
 	}
 
 	/* allocate our structure and fill it out */
