@@ -80,16 +80,16 @@ static unsigned desc_size(const struct kvm_device_desc *desc)
 }
 
 /* This gets the device's feature bits. */
-static u32 kvm_get_features(struct virtio_device *vdev)
+static u64 kvm_get_features(struct virtio_device *vdev)
 {
 	unsigned int i;
-	u32 features = 0;
+	u64 features = 0;
 	struct kvm_device_desc *desc = to_kvmdev(vdev)->desc;
 	u8 *in_features = kvm_vq_features(desc);
 
-	for (i = 0; i < min(desc->feature_len * 8, 32); i++)
+	for (i = 0; i < min(desc->feature_len * 8, 64); i++)
 		if (in_features[i / 8] & (1 << (i % 8)))
-			features |= (1 << i);
+			features |= (1ULL << i);
 	return features;
 }
 
@@ -106,7 +106,7 @@ static void kvm_finalize_features(struct virtio_device *vdev)
 	memset(out_features, 0, desc->feature_len);
 	bits = min_t(unsigned, desc->feature_len, sizeof(vdev->features)) * 8;
 	for (i = 0; i < bits; i++) {
-		if (vdev->features & (1 << i))
+		if (vdev->features & (1ULL << i))
 			out_features[i / 8] |= (1 << (i % 8));
 	}
 }

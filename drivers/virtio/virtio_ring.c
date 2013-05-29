@@ -814,7 +814,7 @@ void vring_transport_features(struct virtio_device *vdev)
 			break;
 		default:
 			/* We don't understand this bit. */
-			vdev->features &= ~(1 << i);
+			vdev->features &= ~(1ULL << i);
 		}
 	}
 }

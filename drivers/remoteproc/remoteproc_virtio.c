@@ -196,7 +196,7 @@ static void rproc_virtio_reset(struct virtio_device *vdev)
 }
 
 /* provide the vdev features as retrieved from the firmware */
-static u32 rproc_virtio_get_features(struct virtio_device *vdev)
+static u64 rproc_virtio_get_features(struct virtio_device *vdev)
 {
 	struct rproc_vdev *rvdev = vdev_to_rvdev(vdev);
 
@@ -209,6 +209,9 @@ static void rproc_virtio_finalize_features(struct virtio_device *vdev)
 
 	/* Give virtio_ring a chance to accept features */
 	vring_transport_features(vdev);
+
+	/* Make sure we don't have any features > 32 bits! */
+	BUG_ON((u32)vdev->features != vdev->features);
 
 	/*
 	 * Remember the finalized features of our vdev, and provide it

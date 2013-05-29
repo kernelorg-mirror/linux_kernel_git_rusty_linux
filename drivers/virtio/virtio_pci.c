@@ -105,12 +105,11 @@ static struct virtio_pci_device *to_vp_device(struct virtio_device *vdev)
 }
 
 /* virtio config->get_features() implementation */
-static u32 vp_get_features(struct virtio_device *vdev)
+static u64 vp_get_features(struct virtio_device *vdev)
 {
 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
 
-	/* When someone needs more than 32 feature bits, we'll need to
-	 * steal a bit to indicate that the rest are somewhere else. */
+	/* We only support 32 feature bits. */
 	return ioread32(vp_dev->ioaddr + VIRTIO_PCI_HOST_FEATURES);
 }
 
