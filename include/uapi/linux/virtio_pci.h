@@ -133,6 +133,11 @@ struct virtio_pci_cap {
 	__le32 length;	/* Length. */
 };
 
+struct virtio_pci_notify_cap {
+	struct virtio_pci_cap cap;
+	__le32 notify_off_multiplier;	/* Multiplier for queue_notify_off. */
+};
+
 /* Fields in VIRTIO_PCI_CAP_COMMON_CFG: */
 struct virtio_pci_common_cfg {
 	/* About the whole device. */
@@ -144,15 +149,15 @@ struct virtio_pci_common_cfg {
 	__le16 num_queues;		/* read-only */
 	__u8 device_status;		/* read-write */
 	__u8 unused1;
-	__le16 unused2;
 
 	/* About a specific virtqueue. */
-	__le16 queue_select;	/* read-write */
-	__le16 queue_size;	/* read-write, power of 2. */
-	__le16 queue_msix_vector;/* read-write */
-	__le16 queue_enable;	/* read-write */
-	__le64 queue_desc;	/* read-write */
-	__le64 queue_avail;	/* read-write */
-	__le64 queue_used;	/* read-write */
+	__le16 queue_select;		/* read-write */
+	__le16 queue_size;		/* read-write, power of 2. */
+	__le16 queue_msix_vector;	/* read-write */
+	__le16 queue_enable;		/* read-write */
+	__le16 queue_notify_off;	/* read-only */
+	__le64 queue_desc;		/* read-write */
+	__le64 queue_avail;		/* read-write */
+	__le64 queue_used;		/* read-write */
 };
 #endif /* _UAPI_LINUX_VIRTIO_PCI_H */

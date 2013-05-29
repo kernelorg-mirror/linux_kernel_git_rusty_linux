@@ -37,10 +37,17 @@ struct virtio_pci_device {
 	struct virtio_pci_common_cfg __iomem *common;
 	/* Where to read and clear interrupt */
 	u8 __iomem *isr;
-	/* Write the virtqueue index here to notify device of activity. */
-	__le16 __iomem *notify;
+	/* Write the vq index here to notify device of activity. */
+	void __iomem *notify_base;
 	/* Device-specific data. */
 	void __iomem *device;
+
+	/* So we can sanity-check accesses. */
+	size_t notify_len;
+	size_t device_len;
+
+	/* Multiply queue_notify_off by this value. */
+	u32 notify_offset_multiplier;
 
 	/* a list of queues so we can dispatch IRQs */
 	spinlock_t lock;
@@ -83,6 +90,9 @@ struct virtio_pci_vq_info {
 
 	/* the list node for the virtqueues list */
 	struct list_head node;
+
+	/* Notify area for this vq. */
+	u16 __iomem *notify;
 
 	/* MSI-X vector (or none) */
 	unsigned msix_vector;
@@ -240,11 +250,11 @@ static void vp_reset(struct virtio_device *vdev)
 /* the notify function used when creating a virt queue */
 static void vp_notify(struct virtqueue *vq)
 {
-	struct virtio_pci_device *vp_dev = to_vp_device(vq->vdev);
+	struct virtio_pci_vq_info *info = vq->priv;
 
-	/* we write the queue's selector into the notification register to
-	 * signal the other end */
-	iowrite16(vq->index, vp_dev->notify);
+	/* we write the queue selector into the notification register
+	 * to signal the other end */
+	iowrite16(vq->index, info->notify);
 }
 
 /* Handle a configuration change: Tell driver if it wants to know. */
@@ -459,7 +469,7 @@ static struct virtqueue *setup_vq(struct virtio_device *vdev, unsigned index,
 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
 	struct virtio_pci_vq_info *info;
 	struct virtqueue *vq;
-	u16 num;
+	u16 num, off;
 	int err;
 
 	if (index >= ioread16(&vp_dev->common->num_queues))
@@ -491,6 +501,19 @@ static struct virtqueue *setup_vq(struct virtio_device *vdev, unsigned index,
 		return ERR_PTR(-ENOMEM);
 
 	info->msix_vector = msix_vec;
+
+	/* get offset of notification word for this vq (shouldn't wrap) */
+	off = ioread16(&vp_dev->common->queue_notify_off);
+	if ((u64)off * vp_dev->notify_offset_multiplier + 2
+	    > vp_dev->notify_len) {
+		dev_warn(&vp_dev->pci_dev->dev,
+			 "bad notification offset %u (x %u) for queue %u > %u",
+			 off, vp_dev->notify_offset_multiplier, 
+			 index, vp_dev->notify_len);
+		err = -EINVAL;
+		goto out_info;
+	}
+	info->notify = vp_dev->notify_base + off * vp_dev->notify_offset_multiplier;
 
 	info->queue = alloc_virtqueue_pages(&num);
 	if (info->queue == NULL) {
@@ -790,7 +813,8 @@ static void virtio_pci_release_dev(struct device *_d)
 	 */
 }
 
-static void __iomem *map_capability(struct pci_dev *dev, int off, size_t expect)
+static void __iomem *map_capability(struct pci_dev *dev, int off, size_t minlen,
+				    size_t *len)
 {
 	u8 bar;
 	u32 offset, length;
@@ -803,12 +827,15 @@ static void __iomem *map_capability(struct pci_dev *dev, int off, size_t expect)
 	pci_read_config_dword(dev, off + offsetof(struct virtio_pci_cap, length),
 			     &length);
 
-	if (length < expect) {
+	if (length < minlen) {
 		dev_err(&dev->dev,
-			"virtio_pci: small capability len %u (%u expected)\n",
-			length, expect);
+			"virtio_pci: small capability len %u (%zu expected)\n",
+			length, minlen);
 		return NULL;
 	}
+
+	if (len)
+		*len = length;
 
 	/* We want uncachable mapping, even if bar is cachable. */
 	p = pci_iomap_range(dev, bar, offset, length, PAGE_SIZE, true);
@@ -886,16 +913,24 @@ static int virtio_pci_probe(struct pci_dev *pci_dev,
 
 	err = -EINVAL;
 	vp_dev->common = map_capability(pci_dev, common,
-					sizeof(struct virtio_pci_common_cfg));
+					sizeof(struct virtio_pci_common_cfg),
+					NULL);
 	if (!vp_dev->common)
 		goto out_req_regions;
-	vp_dev->isr = map_capability(pci_dev, isr, sizeof(u8));
+	vp_dev->isr = map_capability(pci_dev, isr, sizeof(u8), NULL);
 	if (!vp_dev->isr)
 		goto out_map_common;
-	vp_dev->notify = map_capability(pci_dev, notify, sizeof(u16));
-	if (!vp_dev->notify)
+
+	/* Read notify_off_multiplier from config space. */
+	pci_read_config_dword(pci_dev,
+			      notify + offsetof(struct virtio_pci_notify_cap,
+						notify_off_multiplier),
+			      &vp_dev->notify_offset_multiplier);
+	vp_dev->notify_base = map_capability(pci_dev, notify, sizeof(u8),
+					     &vp_dev->notify_len);
+	if (!vp_dev->notify_len)
 		goto out_map_isr;
-	vp_dev->device = map_capability(pci_dev, device, 0);
+	vp_dev->device = map_capability(pci_dev, device, 0, &vp_dev->device_len);
 	if (!vp_dev->device)
 		goto out_map_notify;
 
@@ -920,7 +955,7 @@ out_set_drvdata:
 	pci_set_drvdata(pci_dev, NULL);
 	pci_iounmap(pci_dev, vp_dev->device);
 out_map_notify:
-	pci_iounmap(pci_dev, vp_dev->notify);
+	pci_iounmap(pci_dev, vp_dev->notify_base);
 out_map_isr:
 	pci_iounmap(pci_dev, vp_dev->isr);
 out_map_common:
@@ -943,7 +978,7 @@ static void virtio_pci_remove(struct pci_dev *pci_dev)
 	vp_del_vqs(&vp_dev->vdev);
 	pci_set_drvdata(pci_dev, NULL);
 	pci_iounmap(pci_dev, vp_dev->device);
-	pci_iounmap(pci_dev, vp_dev->notify);
+	pci_iounmap(pci_dev, vp_dev->notify_base);
 	pci_iounmap(pci_dev, vp_dev->isr);
 	pci_iounmap(pci_dev, vp_dev->common);
 	pci_release_regions(pci_dev);
