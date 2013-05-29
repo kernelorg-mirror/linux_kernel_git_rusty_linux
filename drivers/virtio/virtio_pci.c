@@ -230,6 +230,7 @@ static struct virtqueue *setup_vq(struct virtio_pci_device *vp_dev,
 		return ERR_PTR(-ENOMEM);
 
 	info->msix_vector = msix_vec;
+	info->desired_num = num;
 
 	/* get offset of notification word for this vq (shouldn't wrap) */
 	off = ioread16(&vp_dev->common->queue_notify_off);
@@ -350,7 +351,7 @@ static void del_vq(struct virtqueue *vq)
 	vring_del_virtqueue(vq);
 
 	/* This is for our own benefit, not the device's! */
-	iowrite16(0, &vp_dev->common->queue_size);
+	iowrite16(info->desired_num, &vp_dev->common->queue_size);
 	iowrite64_twopart(0, &vp_dev->common->queue_desc);
 	iowrite64_twopart(0, &vp_dev->common->queue_avail);
 	iowrite64_twopart(0, &vp_dev->common->queue_used);

@@ -82,6 +82,9 @@ struct virtio_pci_vq_info {
 
 	/* MSI-X vector (or none) */
 	unsigned msix_vector;
+
+	/* What size did the device *want* this to be? */
+	u16 desired_num;
 };
 
 /* the notify function used when creating a virt queue */
