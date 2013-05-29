@@ -93,21 +93,33 @@ irqreturn_t virtio_pci_vring_interrupt(int irq, void *opaque);
 /* Acknowledge, check for config or vq interrupt. */
 irqreturn_t virtio_pci_interrupt(int irq, void *opaque);
 
+typedef struct virtqueue *virtio_pci_setup_vq_fn(struct virtio_device *,
+						 unsigned index,
+						 void (*callback)
+							(struct virtqueue *),
+						 const char *name,
+						 u16 msix_vec);
+
 /* Core of a config->find_vqs() implementation */
-int virtio_pci_find_vqs(struct virtio_pci_device *vp_dev,
-			__le16 __iomem *msix_config,
-			struct virtqueue *(setup_vq)(struct virtio_pci_device *,
-						     unsigned,
-						     void (*)(struct virtqueue*),
-						     const char *,
-						     u16 msix_vec),
-			void (*del_vq)(struct virtqueue *vq),
+int virtio_pci_find_vqs(struct virtio_device *vdev,
 			unsigned nvqs,
 			struct virtqueue *vqs[],
 			vq_callback_t *callbacks[],
-			const char *names[]);
+			const char *names[],
+			__le16 __iomem *msix_config,
+			virtio_pci_setup_vq_fn *setup_vq,
+			void (*del_vq)(struct virtqueue *vq));
 
 /* the core of a config->del_vqs() implementation */
-void virtio_pci_del_vqs(struct virtio_pci_device *vp_dev,
+void virtio_pci_del_vqs(struct virtio_device *vdev,
 			__le16 __iomem *msix_config,
 			void (*del_vq)(struct virtqueue *vq));
+
+void virtio_pci_synchronize_vectors(struct virtio_device *vdev);
+
+int virtio_pci_set_vq_affinity(struct virtqueue *vq, int cpu);
+
+#ifdef CONFIG_PM
+int virtio_pci_freeze(struct device *dev);
+int virtio_pci_restore(struct device *dev);
+#endif
