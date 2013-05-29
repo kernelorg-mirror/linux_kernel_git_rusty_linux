@@ -81,14 +81,14 @@ struct virtio_pci_vq_info
 	/* the actual virtqueue */
 	struct virtqueue *vq;
 
-	/* the number of entries in the queue */
-	int num;
-
 	/* the virtual address of the ring queue */
 	void *queue;
 
 	/* the list node for the virtqueues list */
 	struct list_head node;
+
+	/* Notify area for this vq. */
+	u16 __iomem *notify;
 
 	/* MSI-X vector (or none) */
 	unsigned msix_vector;
@@ -192,11 +192,11 @@ static void vp_reset(struct virtio_device *vdev)
 /* the notify function used when creating a virt queue */
 static void vp_notify(struct virtqueue *vq)
 {
-	struct virtio_pci_device *vp_dev = to_vp_device(vq->vdev);
+	struct virtio_pci_vq_info *info = vq->priv;
 
-	/* we write the queue's selector into the notification register to
-	 * signal the other end */
-	iowrite16(vq->index, vp_dev->ioaddr + VIRTIO_PCI_LEGACY_QUEUE_NOTIFY);
+	/* we write the queue selector into the notification register
+	 * to signal the other end */
+	iowrite16(vq->index, info->notify);
 }
 
 /* Handle a configuration change: Tell driver if it wants to know. */
@@ -407,7 +407,6 @@ static struct virtqueue *setup_vq(struct virtio_device *vdev, unsigned index,
 	if (!info)
 		return ERR_PTR(-ENOMEM);
 
-	info->num = num;
 	info->msix_vector = msix_vec;
 
 	size = PAGE_ALIGN(vring_size(num, VIRTIO_PCI_LEGACY_VRING_ALIGN));
@@ -422,7 +421,7 @@ static struct virtqueue *setup_vq(struct virtio_device *vdev, unsigned index,
 		  vp_dev->ioaddr + VIRTIO_PCI_LEGACY_QUEUE_PFN);
 
 	/* create the vring */
-	vq = vring_new_virtqueue(index, info->num,
+	vq = vring_new_virtqueue(index, num,
 				 VIRTIO_PCI_LEGACY_VRING_ALIGN, vdev,
 				 true, info->queue, vp_notify, callback, name);
 	if (!vq) {
@@ -432,6 +431,7 @@ static struct virtqueue *setup_vq(struct virtio_device *vdev, unsigned index,
 
 	vq->priv = info;
 	info->vq = vq;
+	info->notify = vp_dev->ioaddr + VIRTIO_PCI_LEGACY_QUEUE_NOTIFY;
 
 	if (msix_vec != VIRTIO_MSI_NO_VECTOR) {
 		iowrite16(msix_vec,
@@ -488,7 +488,8 @@ static void vp_del_vq(struct virtqueue *vq)
 	/* Select and deactivate the queue */
 	iowrite32(0, vp_dev->ioaddr + VIRTIO_PCI_LEGACY_QUEUE_PFN);
 
-	size = PAGE_ALIGN(vring_size(info->num, VIRTIO_PCI_LEGACY_VRING_ALIGN));
+	size = PAGE_ALIGN(vring_size(vq->vring.num,
+				     VIRTIO_PCI_LEGACY_VRING_ALIGN));
 	free_pages_exact(info->queue, size);
 	kfree(info);
 }
