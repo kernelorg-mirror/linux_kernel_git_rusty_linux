@@ -86,8 +86,10 @@
 #define VIRTIO_PCI_LEGACY_VRING_ALIGN		4096
 
 #ifndef VIRTIO_PCI_NO_LEGACY
+#ifndef VIRTIO_PCI_LEGACY_COMPAT_NAMES
 /* Don't break compile of old userspace code.  These will go away. */
 #warning "Please support virtio_pci non-legacy mode!"
+#endif
 #define VIRTIO_PCI_HOST_FEATURES VIRTIO_PCI_LEGACY_HOST_FEATURES
 #define VIRTIO_PCI_GUEST_FEATURES VIRTIO_PCI_LEGACY_GUEST_FEATURES
 #define VIRTIO_PCI_QUEUE_PFN VIRTIO_PCI_LEGACY_QUEUE_PFN
@@ -125,10 +127,10 @@
 
 /* This is the PCI capability header: */
 struct virtio_pci_cap {
-	u8 cap_vndr;	/* Generic PCI field: PCI_CAP_ID_VNDR */
-	u8 cap_next;	/* Generic PCI field: next ptr. */
-	u8 cfg_type;	/* One of the VIRTIO_PCI_CAP_*_CFG. */
-	u8 bar;		/* Where to find it. */
+	__u8 cap_vndr;	/* Generic PCI field: PCI_CAP_ID_VNDR */
+	__u8 cap_next;	/* Generic PCI field: next ptr. */
+	__u8 cfg_type;	/* One of the VIRTIO_PCI_CAP_*_CFG. */
+	__u8 bar;		/* Where to find it. */
 	__le32 offset;	/* Offset within bar. */
 	__le32 length;	/* Length. */
 };
@@ -144,7 +146,7 @@ struct virtio_pci_common_cfg {
 	__le32 device_feature_select;	/* read-write */
 	__le32 device_feature;		/* read-only */
 	__le32 guest_feature_select;	/* read-write */
-	__le32 guest_feature;		/* read-only */
+	__le32 guest_feature;		/* read-write */
 	__le16 msix_config;		/* read-write */
 	__le16 num_queues;		/* read-only */
 	__u8 device_status;		/* read-write */
