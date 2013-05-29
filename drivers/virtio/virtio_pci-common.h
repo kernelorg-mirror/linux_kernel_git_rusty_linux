@@ -47,7 +47,7 @@ struct virtio_pci_device {
 	/* Whether we have vector per vq */
 	bool per_vq_vectors;
 
-#ifdef CONFIG_VIRTIO_PCI_LEGACY
+#if IS_ENABLED(CONFIG_VIRTIO_PCI_LEGACY)
 	/* Instead of common and device, legacy uses this: */
 	void __iomem *legacy;
 #endif

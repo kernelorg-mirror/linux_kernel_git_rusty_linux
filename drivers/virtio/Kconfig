@@ -23,11 +23,11 @@ config VIRTIO_PCI
 	  If unsure, say M.
 
 config VIRTIO_PCI_LEGACY
-	bool
-	default y
+	tristate
+	default VIRTIO_PCI
 	depends on VIRTIO_PCI
 	---help---
-	  The old BAR0 virtio pci layout was deprecated early 2013.
+	  The old BAR0 virtio pci layout was deprecated 2014.
 
 	  So look out into your driveway.  Do you have a flying car?  If
 	  so, you can happily disable this option and virtio will not
