@@ -8,16 +8,30 @@
 
 /**
  * virtio_config_ops - operations for configuring a virtio device
- * @get: read the value of a configuration field
+ * @get8: read a byte from a configuration field
  *	vdev: the virtio_device
  *	offset: the offset of the configuration field
- *	buf: the buffer to write the field value into.
- *	len: the length of the buffer
- * @set: write the value of a configuration field
+ * @set8: write a byte to a configuration field
  *	vdev: the virtio_device
  *	offset: the offset of the configuration field
- *	buf: the buffer to read the field value from.
- *	len: the length of the buffer
+ * @get16: read a short from a configuration field
+ *	vdev: the virtio_device
+ *	offset: the offset of the configuration field
+ * @set16: write a short to a configuration field
+ *	vdev: the virtio_device
+ *	offset: the offset of the configuration field
+ * @get32: read a u32 from a configuration field
+ *	vdev: the virtio_device
+ *	offset: the offset of the configuration field
+ * @set32: write a u32 to a configuration field
+ *	vdev: the virtio_device
+ *	offset: the offset of the configuration field
+ * @get64: read a u64 from a configuration field
+ *	vdev: the virtio_device
+ *	offset: the offset of the configuration field
+ * @set64: write a u64 to a configuration field
+ *	vdev: the virtio_device
+ *	offset: the offset of the configuration field
  * @get_status: read the status byte
  *	vdev: the virtio_device
  *	Returns the status byte
@@ -54,10 +68,14 @@
  */
 typedef void vq_callback_t(struct virtqueue *);
 struct virtio_config_ops {
-	void (*get)(struct virtio_device *vdev, unsigned offset,
-		    void *buf, unsigned len);
-	void (*set)(struct virtio_device *vdev, unsigned offset,
-		    const void *buf, unsigned len);
+	u8 (*get8)(struct virtio_device *vdev, unsigned offset);
+	void (*set8)(struct virtio_device *vdev, unsigned offset, u8 val);
+	u16 (*get16)(struct virtio_device *vdev, unsigned offset);
+	void (*set16)(struct virtio_device *vdev, unsigned offset, u16 val);
+	u32 (*get32)(struct virtio_device *vdev, unsigned offset);
+	void (*set32)(struct virtio_device *vdev, unsigned offset, u32 val);
+	u64 (*get64)(struct virtio_device *vdev, unsigned offset);
+	void (*set64)(struct virtio_device *vdev, unsigned offset, u64 val);
 	u8 (*get_status)(struct virtio_device *vdev);
 	void (*set_status)(struct virtio_device *vdev, u8 status);
 	void (*reset)(struct virtio_device *vdev);
@@ -199,64 +217,62 @@ int virtqueue_set_affinity(struct virtqueue *vq, int cpu)
 
 static inline u8 virtio_cread8(struct virtio_device *vdev, unsigned int offset)
 {
-	u8 ret;
-	vdev->config->get(vdev, offset, &ret, sizeof(ret));
-	return ret;
+	return vdev->config->get8(vdev, offset);
 }
 
 static inline void virtio_cread_bytes(struct virtio_device *vdev,
 				      unsigned int offset,
 				      void *buf, size_t len)
 {
-	vdev->config->get(vdev, offset, buf, len);
+	u8 *dst = buf;
+	while (len) {
+		*dst = vdev->config->get8(vdev, offset);
+		dst++;
+		offset++;
+		len--;
+	}
 }
 
 static inline void virtio_cwrite8(struct virtio_device *vdev,
 				  unsigned int offset, u8 val)
 {
-	vdev->config->set(vdev, offset, &val, sizeof(val));
+	vdev->config->set8(vdev, offset, val);
 }
 
 static inline u16 virtio_cread16(struct virtio_device *vdev,
 				 unsigned int offset)
 {
-	u16 ret;
-	vdev->config->get(vdev, offset, &ret, sizeof(ret));
-	return ret;
+	return vdev->config->get16(vdev, offset);
 }
 
 static inline void virtio_cwrite16(struct virtio_device *vdev,
 				   unsigned int offset, u16 val)
 {
-	vdev->config->set(vdev, offset, &val, sizeof(val));
+	vdev->config->set16(vdev, offset, val);
 }
 
 static inline u32 virtio_cread32(struct virtio_device *vdev,
 				 unsigned int offset)
 {
-	u32 ret;
-	vdev->config->get(vdev, offset, &ret, sizeof(ret));
-	return ret;
+	return vdev->config->get32(vdev, offset);
 }
 
 static inline void virtio_cwrite32(struct virtio_device *vdev,
 				   unsigned int offset, u32 val)
 {
-	vdev->config->set(vdev, offset, &val, sizeof(val));
+	vdev->config->set32(vdev, offset, val);
 }
 
 static inline u64 virtio_cread64(struct virtio_device *vdev,
 				 unsigned int offset)
 {
-	u64 ret;
-	vdev->config->get(vdev, offset, &ret, sizeof(ret));
-	return ret;
+	return vdev->config->get64(vdev, offset);
 }
 
 static inline void virtio_cwrite64(struct virtio_device *vdev,
 				   unsigned int offset, u64 val)
 {
-	vdev->config->set(vdev, offset, &val, sizeof(val));
+	vdev->config->set64(vdev, offset, val);
 }
 
 /* Conditional config space accessors. */

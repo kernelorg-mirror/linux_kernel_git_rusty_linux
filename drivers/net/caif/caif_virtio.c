@@ -682,7 +682,7 @@ static int cfv_probe(struct virtio_device *vdev)
 		goto err;
 
 	/* Get the CAIF configuration from virtio config space, if available */
-	if (vdev->config->get) {
+	if (vdev->config->get8) {
 		virtio_cread(vdev, struct virtio_caif_transf_config, headroom,
 			     &cfv->tx_hr);
 		virtio_cread(vdev, struct virtio_caif_transf_config, headroom,

@@ -153,25 +153,22 @@ static void lg_finalize_features(struct virtio_device *vdev)
 }
 
 /* Once they've found a field, getting a copy of it is easy. */
-static void lg_get(struct virtio_device *vdev, unsigned int offset,
-		   void *buf, unsigned len)
+static u8 lg_get8(struct virtio_device *vdev, unsigned int offset)
 {
 	struct lguest_device_desc *desc = to_lgdev(vdev)->desc;
 
 	/* Check they didn't ask for more than the length of the config! */
-	BUG_ON(offset + len > desc->config_len);
-	memcpy(buf, lg_config(desc) + offset, len);
+	BUG_ON(offset + sizeof(u8) > desc->config_len);
+	return *(u8 *)(lg_config(desc) + offset);
 }
 
-/* Setting the contents is also trivial. */
-static void lg_set(struct virtio_device *vdev, unsigned int offset,
-		   const void *buf, unsigned len)
+static void lg_set8(struct virtio_device *vdev, unsigned int offset, u8 val)
 {
 	struct lguest_device_desc *desc = to_lgdev(vdev)->desc;
 
 	/* Check they didn't ask for more than the length of the config! */
-	BUG_ON(offset + len > desc->config_len);
-	memcpy(lg_config(desc) + offset, buf, len);
+	BUG_ON(offset + sizeof(val) > desc->config_len);
+	*(u8 *)(lg_config(desc) + offset) = val;
 }
 
 /*
@@ -399,8 +396,9 @@ static const char *lg_bus_name(struct virtio_device *vdev)
 static const struct virtio_config_ops lguest_config_ops = {
 	.get_features = lg_get_features,
 	.finalize_features = lg_finalize_features,
-	.get = lg_get,
-	.set = lg_set,
+	.get8 = lg_get8,
+	.set8 = lg_set8,
+	VIRTIO_CONFIG_OPS_NOCONV,
 	.get_status = lg_get_status,
 	.set_status = lg_set_status,
 	.reset = lg_reset,

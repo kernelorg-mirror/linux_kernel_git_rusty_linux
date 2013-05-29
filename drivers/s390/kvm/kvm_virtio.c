@@ -112,24 +112,25 @@ static void kvm_finalize_features(struct virtio_device *vdev)
 }
 
 /*
- * Reading and writing elements in config space
+ * Reading and writing elements in config space.  Host and guest are always
+ * big-endian, so no conversion necessary.
  */
-static void kvm_get(struct virtio_device *vdev, unsigned int offset,
-		   void *buf, unsigned len)
+static u8 kvm_get8(struct virtio_device *vdev, unsigned int offset)
 {
 	struct kvm_device_desc *desc = to_kvmdev(vdev)->desc;
 
-	BUG_ON(offset + len > desc->config_len);
-	memcpy(buf, kvm_vq_configspace(desc) + offset, len);
+	/* Check they didn't ask for more than the length of the config! */
+	BUG_ON(offset + sizeof(u8) > desc->config_len);
+	return *(u8 *)(kvm_vq_configspace(desc) + offset);
 }
 
-static void kvm_set(struct virtio_device *vdev, unsigned int offset,
-		   const void *buf, unsigned len)
+static void kvm_set8(struct virtio_device *vdev, unsigned int offset, u8 val)
 {
 	struct kvm_device_desc *desc = to_kvmdev(vdev)->desc;
 
-	BUG_ON(offset + len > desc->config_len);
-	memcpy(kvm_vq_configspace(desc) + offset, buf, len);
+	/* Check they didn't ask for more than the length of the config! */
+	BUG_ON(offset + sizeof(val) > desc->config_len);
+	*(u8 *)(kvm_vq_configspace(desc) + offset) = val;
 }
 
 /*
@@ -278,8 +279,9 @@ static const char *kvm_bus_name(struct virtio_device *vdev)
 static const struct virtio_config_ops kvm_vq_configspace_ops = {
 	.get_features = kvm_get_features,
 	.finalize_features = kvm_finalize_features,
-	.get = kvm_get,
-	.set = kvm_set,
+	.get8 = kvm_get8,
+	.set8 = kvm_set8,
+	VIRTIO_CONFIG_OPS_NOCONV,
 	.get_status = kvm_get_status,
 	.set_status = kvm_set_status,
 	.reset = kvm_reset,

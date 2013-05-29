@@ -127,33 +127,23 @@ static void vp_finalize_features(struct virtio_device *vdev)
 	iowrite32(vdev->features[0], vp_dev->ioaddr+VIRTIO_PCI_GUEST_FEATURES);
 }
 
-/* virtio config->get() implementation */
-static void vp_get(struct virtio_device *vdev, unsigned offset,
-		   void *buf, unsigned len)
+/* Device config access: we use guest endian, as per spec. */
+static u8 vp_get8(struct virtio_device *vdev, unsigned offset)
 {
 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
 	void __iomem *ioaddr = vp_dev->ioaddr +
 				VIRTIO_PCI_CONFIG(vp_dev) + offset;
-	u8 *ptr = buf;
-	int i;
 
-	for (i = 0; i < len; i++)
-		ptr[i] = ioread8(ioaddr + i);
+	return ioread8(ioaddr);
 }
 
-/* the config->set() implementation.  it's symmetric to the config->get()
- * implementation */
-static void vp_set(struct virtio_device *vdev, unsigned offset,
-		   const void *buf, unsigned len)
+static void vp_set8(struct virtio_device *vdev, unsigned offset, u8 v)
 {
 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
 	void __iomem *ioaddr = vp_dev->ioaddr +
 				VIRTIO_PCI_CONFIG(vp_dev) + offset;
-	const u8 *ptr = buf;
-	int i;
 
-	for (i = 0; i < len; i++)
-		iowrite8(ptr[i], ioaddr + i);
+	iowrite8(v, ioaddr);
 }
 
 /* config->{get,set}_status() implementations */
@@ -653,8 +643,9 @@ static int vp_set_vq_affinity(struct virtqueue *vq, int cpu)
 }
 
 static const struct virtio_config_ops virtio_pci_config_ops = {
-	.get		= vp_get,
-	.set		= vp_set,
+	.get8		= vp_get8,
+	.set8		= vp_set8,
+	VIRTIO_CONFIG_OPS_NOCONV,
 	.get_status	= vp_get_status,
 	.set_status	= vp_set_status,
 	.reset		= vp_reset,

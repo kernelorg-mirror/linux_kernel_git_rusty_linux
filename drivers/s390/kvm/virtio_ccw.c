@@ -472,6 +472,7 @@ out_free:
 	kfree(ccw);
 }
 
+/* We don't need to do endian conversion, as it's always big endian like us */
 static void virtio_ccw_get_config(struct virtio_device *vdev,
 				  unsigned int offset, void *buf, unsigned len)
 {
@@ -505,6 +506,21 @@ out_free:
 	kfree(ccw);
 }
 
+
+#define VIRTIO_CCW_GET_CONFIGx(bits)					\
+static u##bits virtio_ccw_get_config##bits(struct virtio_device *vdev,	\
+					   unsigned int offset)		\
+{									\
+	u##bits v;							\
+	virtio_ccw_get_config(vdev, offset, &v, sizeof(v));		\
+	return v;							\
+}
+
+VIRTIO_CCW_GET_CONFIGx(8)
+VIRTIO_CCW_GET_CONFIGx(16)
+VIRTIO_CCW_GET_CONFIGx(32)
+VIRTIO_CCW_GET_CONFIGx(64)
+
 static void virtio_ccw_set_config(struct virtio_device *vdev,
 				  unsigned int offset, const void *buf,
 				  unsigned len)
@@ -535,6 +551,19 @@ out_free:
 	kfree(ccw);
 }
 
+#define VIRTIO_CCW_SET_CONFIGx(bits)					\
+static void virtio_ccw_set_config##bits(struct virtio_device *vdev,	\
+					unsigned int offset,		\
+					u##bits v)			\
+{									\
+	virtio_ccw_set_config(vdev, offset, &v, sizeof(v));		\
+}
+
+VIRTIO_CCW_SET_CONFIGx(8)
+VIRTIO_CCW_SET_CONFIGx(16)
+VIRTIO_CCW_SET_CONFIGx(32)
+VIRTIO_CCW_SET_CONFIGx(64)
+
 static u8 virtio_ccw_get_status(struct virtio_device *vdev)
 {
 	struct virtio_ccw_device *vcdev = to_vc_device(vdev);
@@ -564,8 +593,14 @@ static void virtio_ccw_set_status(struct virtio_device *vdev, u8 status)
 static struct virtio_config_ops virtio_ccw_config_ops = {
 	.get_features = virtio_ccw_get_features,
 	.finalize_features = virtio_ccw_finalize_features,
-	.get = virtio_ccw_get_config,
-	.set = virtio_ccw_set_config,
+	.get8 = virtio_ccw_get_config8,
+	.set8 = virtio_ccw_set_config8,
+	.get16 = virtio_ccw_get_config16,
+	.set16 = virtio_ccw_set_config16,
+	.get32 = virtio_ccw_get_config32,
+	.set32 = virtio_ccw_set_config32,
+	.get64 = virtio_ccw_get_config64,
+	.set64 = virtio_ccw_set_config64,
 	.get_status = virtio_ccw_get_status,
 	.set_status = virtio_ccw_set_status,
 	.reset = virtio_ccw_reset,

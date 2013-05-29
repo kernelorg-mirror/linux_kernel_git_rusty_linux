@@ -167,26 +167,18 @@ static void vm_finalize_features(struct virtio_device *vdev)
 	}
 }
 
-static void vm_get(struct virtio_device *vdev, unsigned offset,
-		   void *buf, unsigned len)
+static u8 vm_get8(struct virtio_device *vdev, unsigned offset)
 {
 	struct virtio_mmio_device *vm_dev = to_virtio_mmio_device(vdev);
-	u8 *ptr = buf;
-	int i;
 
-	for (i = 0; i < len; i++)
-		ptr[i] = readb(vm_dev->base + VIRTIO_MMIO_CONFIG + offset + i);
+	return readb(vm_dev->base + VIRTIO_MMIO_CONFIG + offset);
 }
 
-static void vm_set(struct virtio_device *vdev, unsigned offset,
-		   const void *buf, unsigned len)
+static void vm_set8(struct virtio_device *vdev, unsigned offset, u8 v)
 {
 	struct virtio_mmio_device *vm_dev = to_virtio_mmio_device(vdev);
-	const u8 *ptr = buf;
-	int i;
 
-	for (i = 0; i < len; i++)
-		writeb(ptr[i], vm_dev->base + VIRTIO_MMIO_CONFIG + offset + i);
+	writeb(v, vm_dev->base + VIRTIO_MMIO_CONFIG + offset);
 }
 
 static u8 vm_get_status(struct virtio_device *vdev)
@@ -424,8 +416,9 @@ static const char *vm_bus_name(struct virtio_device *vdev)
 }
 
 static const struct virtio_config_ops virtio_mmio_config_ops = {
-	.get		= vm_get,
-	.set		= vm_set,
+	.get8		= vm_get8,
+	.set8		= vm_set8,
+	VIRTIO_CONFIG_OPS_NOCONV,
 	.get_status	= vm_get_status,
 	.set_status	= vm_set_status,
 	.reset		= vm_reset,
