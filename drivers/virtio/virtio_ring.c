@@ -814,7 +814,7 @@ void vring_transport_features(struct virtio_device *vdev)
 			break;
 		default:
 			/* We don't understand this bit. */
-			clear_bit(i, vdev->features);
+			vdev->features &= ~(1 << i);
 		}
 	}
 }

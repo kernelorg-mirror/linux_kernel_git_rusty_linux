@@ -219,7 +219,7 @@ static void rproc_virtio_finalize_features(struct virtio_device *vdev)
 	 * fixed as part of a small resource table overhaul and then an
 	 * extension of the virtio resource entries.
 	 */
-	rvdev->gfeatures = vdev->features[0];
+	rvdev->gfeatures = vdev->features;
 }
 
 static const struct virtio_config_ops rproc_virtio_config_ops = {
