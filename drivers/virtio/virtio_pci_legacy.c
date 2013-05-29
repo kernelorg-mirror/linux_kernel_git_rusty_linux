@@ -1,5 +1,5 @@
 /*
- * Virtio PCI driver
+ * Virtio PCI driver (legacy mode)
  *
  * This module allows virtio devices to be used over a virtual PCI device.
  * This can be used with QEMU based VMMs like KVM or Xen.
@@ -27,7 +27,7 @@
 #include <linux/spinlock.h>
 
 MODULE_AUTHOR("Anthony Liguori <aliguori@us.ibm.com>");
-MODULE_DESCRIPTION("virtio-pci");
+MODULE_DESCRIPTION("virtio-pci-legacy");
 MODULE_LICENSE("GPL");
 MODULE_VERSION("1");
 
@@ -676,7 +676,7 @@ static int virtio_pci_probe(struct pci_dev *pci_dev,
 		return -ENODEV;
 
 	if (pci_dev->revision != VIRTIO_PCI_ABI_VERSION) {
-		printk(KERN_ERR "virtio_pci: expected ABI version %d, got %d\n",
+		printk(KERN_ERR "virtio_pci_legacy: expected ABI version %d, got %d\n",
 		       VIRTIO_PCI_ABI_VERSION, pci_dev->revision);
 		return -ENODEV;
 	}
@@ -701,7 +701,7 @@ static int virtio_pci_probe(struct pci_dev *pci_dev,
 	if (err)
 		goto out;
 
-	err = pci_request_regions(pci_dev, "virtio-pci");
+	err = pci_request_regions(pci_dev, "virtio-pci-legacy");
 	if (err)
 		goto out_enable_device;
 
@@ -807,8 +807,8 @@ static const struct dev_pm_ops virtio_pci_pm_ops = {
 };
 #endif
 
-static struct pci_driver virtio_pci_driver = {
-	.name		= "virtio-pci",
+static struct pci_driver virtio_pci_driver_legacy = {
+	.name		= "virtio-pci-legacy",
 	.id_table	= virtio_pci_id_table,
 	.probe		= virtio_pci_probe,
 	.remove		= virtio_pci_remove,
@@ -817,4 +817,4 @@ static struct pci_driver virtio_pci_driver = {
 #endif
 };
 
-module_pci_driver(virtio_pci_driver);
+module_pci_driver(virtio_pci_driver_legacy);
