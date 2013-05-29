@@ -37,12 +37,6 @@ static DEFINE_PCI_DEVICE_TABLE(virtio_pci_id_table) = {
 
 MODULE_DEVICE_TABLE(pci, virtio_pci_id_table);
 
-/* Convert a generic virtio device to our structure */
-static struct virtio_pci_device *to_vp_device(struct virtio_device *vdev)
-{
-	return container_of(vdev, struct virtio_pci_device, vdev);
-}
-
 /* There is no general iowrite64.  We use two 32-bit ops. */
 static void iowrite64_twopart(u64 val, const __le64 *addr)
 {
@@ -178,73 +172,6 @@ static void vp_reset(struct virtio_device *vdev)
 	vp_synchronize_vectors(vdev);
 }
 
-/* the notify function used when creating a virt queue */
-static void vp_notify(struct virtqueue *vq)
-{
-	struct virtio_pci_vq_info *info = vq->priv;
-
-	/* we write the queue selector into the notification register
-	 * to signal the other end */
-	iowrite16(vq->index, info->notify);
-}
-
-/* Handle a configuration change: Tell driver if it wants to know. */
-static irqreturn_t vp_config_changed(int irq, void *opaque)
-{
-	struct virtio_pci_device *vp_dev = opaque;
-	struct virtio_driver *drv;
-	drv = container_of(vp_dev->vdev.dev.driver,
-			   struct virtio_driver, driver);
-
-	if (drv->config_changed)
-		drv->config_changed(&vp_dev->vdev);
-	return IRQ_HANDLED;
-}
-
-/* Notify all virtqueues on an interrupt. */
-static irqreturn_t vp_vring_interrupt(int irq, void *opaque)
-{
-	struct virtio_pci_device *vp_dev = opaque;
-	struct virtio_pci_vq_info *info;
-	irqreturn_t ret = IRQ_NONE;
-	unsigned long flags;
-
-	spin_lock_irqsave(&vp_dev->lock, flags);
-	list_for_each_entry(info, &vp_dev->virtqueues, node) {
-		if (vring_interrupt(irq, info->vq) == IRQ_HANDLED)
-			ret = IRQ_HANDLED;
-	}
-	spin_unlock_irqrestore(&vp_dev->lock, flags);
-
-	return ret;
-}
-
-/* A small wrapper to also acknowledge the interrupt when it's handled.
- * I really need an EIO hook for the vring so I can ack the interrupt once we
- * know that we'll be handling the IRQ but before we invoke the callback since
- * the callback may notify the host which results in the host attempting to
- * raise an interrupt that we would then mask once we acknowledged the
- * interrupt. */
-static irqreturn_t vp_interrupt(int irq, void *opaque)
-{
-	struct virtio_pci_device *vp_dev = opaque;
-	u8 isr;
-
-	/* reading the ISR has the effect of also clearing it so it's very
-	 * important to save off the value. */
-	isr = ioread8(vp_dev->isr);
-
-	/* It's definitely not us if the ISR was not high */
-	if (!isr)
-		return IRQ_NONE;
-
-	/* Configuration change?  Tell driver if it wants to know. */
-	if (isr & VIRTIO_PCI_ISR_CONFIG)
-		vp_config_changed(irq, opaque);
-
-	return vp_vring_interrupt(irq, opaque);
-}
-
 static void vp_free_vectors(struct virtio_device *vdev)
 {
 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
@@ -325,7 +252,7 @@ static int vp_request_msix_vectors(struct virtio_device *vdev, int nvectors,
 	snprintf(vp_dev->msix_names[v], sizeof *vp_dev->msix_names,
 		 "%s-config", name);
 	err = request_irq(vp_dev->msix_entries[v].vector,
-			  vp_config_changed, 0, vp_dev->msix_names[v],
+			  virtio_pci_config_changed, 0, vp_dev->msix_names[v],
 			  vp_dev);
 	if (err)
 		goto error;
@@ -345,8 +272,8 @@ static int vp_request_msix_vectors(struct virtio_device *vdev, int nvectors,
 		snprintf(vp_dev->msix_names[v], sizeof *vp_dev->msix_names,
 			 "%s-virtqueues", name);
 		err = request_irq(vp_dev->msix_entries[v].vector,
-				  vp_vring_interrupt, 0, vp_dev->msix_names[v],
-				  vp_dev);
+				  virtio_pci_vring_interrupt, 0,
+				  vp_dev->msix_names[v], vp_dev);
 		if (err)
 			goto error;
 		++vp_dev->msix_used_vectors;
@@ -362,7 +289,7 @@ static int vp_request_intx(struct virtio_device *vdev)
 	int err;
 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
 
-	err = request_irq(vp_dev->pci_dev->irq, vp_interrupt,
+	err = request_irq(vp_dev->pci_dev->irq, virtio_pci_interrupt,
 			  IRQF_SHARED, dev_name(&vdev->dev), vp_dev);
 	if (!err)
 		vp_dev->intx_enabled = 1;
@@ -454,7 +381,8 @@ static struct virtqueue *setup_vq(struct virtio_device *vdev, unsigned index,
 
 	/* create the vring */
 	vq = vring_new_virtqueue(index, num, SMP_CACHE_BYTES, vdev,
-				 true, info->queue, vp_notify, callback, name);
+				 true, info->queue, virtio_pci_notify,
+				 callback, name);
 	if (!vq) {
 		err = -ENOMEM;
 		goto out_alloc_pages;

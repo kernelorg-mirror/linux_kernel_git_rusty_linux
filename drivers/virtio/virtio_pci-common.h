@@ -53,6 +53,12 @@ struct virtio_pci_device {
 #endif
 };
 
+/* Convert a generic virtio device to our structure */
+static inline struct virtio_pci_device *to_vp_device(struct virtio_device *vdev)
+{
+	return container_of(vdev, struct virtio_pci_device, vdev);
+}
+
 /* Constants for MSI-X */
 /* Use first vector for configuration changes, second and the rest for
  * virtqueues Thus, we need at least 2 vectors for MSI. */
@@ -77,3 +83,31 @@ struct virtio_pci_vq_info {
 	/* MSI-X vector (or none) */
 	unsigned msix_vector;
 };
+
+/* the notify function used when creating a virt queue */
+void virtio_pci_notify(struct virtqueue *vq);
+/* Handle a configuration change: Tell driver if it wants to know. */
+irqreturn_t virtio_pci_config_changed(int irq, void *opaque);
+/* Notify all virtqueues on an interrupt. */
+irqreturn_t virtio_pci_vring_interrupt(int irq, void *opaque);
+/* Acknowledge, check for config or vq interrupt. */
+irqreturn_t virtio_pci_interrupt(int irq, void *opaque);
+
+/* Core of a config->find_vqs() implementation */
+int virtio_pci_find_vqs(struct virtio_pci_device *vp_dev,
+			__le16 __iomem *msix_config,
+			struct virtqueue *(setup_vq)(struct virtio_pci_device *,
+						     unsigned,
+						     void (*)(struct virtqueue*),
+						     const char *,
+						     u16 msix_vec),
+			void (*del_vq)(struct virtqueue *vq),
+			unsigned nvqs,
+			struct virtqueue *vqs[],
+			vq_callback_t *callbacks[],
+			const char *names[]);
+
+/* the core of a config->del_vqs() implementation */
+void virtio_pci_del_vqs(struct virtio_pci_device *vp_dev,
+			__le16 __iomem *msix_config,
+			void (*del_vq)(struct virtqueue *vq));
