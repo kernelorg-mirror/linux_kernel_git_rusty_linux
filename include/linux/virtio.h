@@ -9,6 +9,7 @@
 #include <linux/mod_devicetable.h>
 #include <linux/gfp.h>
 #include <linux/vringh.h>
+#include <uapi/linux/virtio_ring.h>
 
 /**
  * virtqueue - a queue to register buffers for sending or receiving.
@@ -19,6 +20,7 @@
  * @priv: a pointer for the virtqueue implementation to use.
  * @index: the zero-based ordinal number for this queue.
  * @num_free: number of elements we expect to be able to fit.
+ * @vring: the layout of the virtio ring.
  *
  * A note on @num_free: with indirect buffers, each buffer needs one
  * element in the queue, otherwise a buffer will need one element per
@@ -31,6 +33,7 @@ struct virtqueue {
 	struct virtio_device *vdev;
 	unsigned int index;
 	unsigned int num_free;
+	struct vring vring;
 	void *priv;
 };
 
@@ -74,7 +77,10 @@ bool virtqueue_enable_cb_delayed(struct virtqueue *vq);
 
 void *virtqueue_detach_unused_buf(struct virtqueue *vq);
 
-unsigned int virtqueue_get_vring_size(struct virtqueue *vq);
+static inline unsigned int virtqueue_get_vring_size(struct virtqueue *vq)
+{
+	return vq->vring.num;
+}
 
 /* FIXME: Obsolete accessor, but required for virtio_net merge. */
 static inline unsigned int virtqueue_get_queue_index(struct virtqueue *vq)
