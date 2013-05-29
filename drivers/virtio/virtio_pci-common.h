@@ -121,5 +121,4 @@ int virtio_pci_set_vq_affinity(struct virtqueue *vq, int cpu);
 
 #ifdef CONFIG_PM
 int virtio_pci_freeze(struct device *dev);
-int virtio_pci_restore(struct device *dev);
 #endif

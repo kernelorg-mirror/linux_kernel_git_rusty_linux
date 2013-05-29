@@ -50,6 +50,21 @@ static u64 ioread64_twopart(__le64 *addr)
 	return ioread32(addr) | ((u64)ioread32((__le32 *)addr + 1) << 32);
 }
 
+/* config->{get,set}_status() implementations */
+static u8 vp_get_status(struct virtio_device *vdev)
+{
+	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
+	return ioread8(&vp_dev->common->device_status);
+}
+
+static void vp_set_status(struct virtio_device *vdev, u8 status)
+{
+	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
+	/* We should never be setting status to 0. */
+	BUG_ON(status == 0);
+	iowrite8(status, &vp_dev->common->device_status);
+}
+
 static u64 vp_get_features(struct virtio_device *vdev)
 {
 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
@@ -62,17 +77,25 @@ static u64 vp_get_features(struct virtio_device *vdev)
 	return features;
 }
 
-static void vp_finalize_features(struct virtio_device *vdev)
+static void write_features(struct virtio_device *vdev)
 {
 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
-
-	/* Give virtio_ring a chance to accept features. */
-	vring_transport_features(vdev);
 
 	iowrite32(0, &vp_dev->common->guest_feature_select);
 	iowrite32((u32)vdev->features, &vp_dev->common->guest_feature);
 	iowrite32(1, &vp_dev->common->guest_feature_select);
 	iowrite32(vdev->features >> 32, &vp_dev->common->guest_feature);
+}
+
+static void vp_finalize_features(struct virtio_device *vdev)
+{
+	/* Give virtio_ring a chance to accept features. */
+	vring_transport_features(vdev);
+
+	write_features(vdev);
+
+	/* Update status to lock it in. */
+	vp_set_status(vdev, vp_get_status(vdev)|VIRTIO_CONFIG_S_FEATURES_DONE);
 }
 
 /* virtio config is little-endian for virtio_pci (vs guest-endian for legacy) */
@@ -130,21 +153,6 @@ static void vp_set64(struct virtio_device *vdev, unsigned offset, u64 val)
 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
 
 	iowrite64_twopart(val, vp_dev->device + offset);
-}
-
-/* config->{get,set}_status() implementations */
-static u8 vp_get_status(struct virtio_device *vdev)
-{
-	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
-	return ioread8(&vp_dev->common->device_status);
-}
-
-static void vp_set_status(struct virtio_device *vdev, u8 status)
-{
-	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
-	/* We should never be setting status to 0. */
-	BUG_ON(status == 0);
-	iowrite8(status, &vp_dev->common->device_status);
 }
 
 static void vp_reset(struct virtio_device *vdev)
@@ -581,6 +589,33 @@ static void virtio_pci_remove(struct pci_dev *pci_dev)
 }
 
 #ifdef CONFIG_PM
+static int virtio_pci_restore(struct device *dev)
+{
+	struct pci_dev *pci_dev = to_pci_dev(dev);
+	struct virtio_pci_device *vp_dev = pci_get_drvdata(pci_dev);
+	struct virtio_driver *drv;
+	int ret;
+
+	drv = container_of(vp_dev->vdev.dev.driver,
+			   struct virtio_driver, driver);
+
+	ret = pci_enable_device(pci_dev);
+	if (ret)
+		return ret;
+
+	pci_set_master(pci_dev);
+	write_features(&vp_dev->vdev);
+
+	if (drv && drv->restore)
+		ret = drv->restore(&vp_dev->vdev);
+
+	/* Finally, tell the device we're all set */
+	if (!ret)
+		vp_set_status(&vp_dev->vdev, vp_dev->saved_status);
+
+	return ret;
+}
+
 static const struct dev_pm_ops virtio_pci_pm_ops = {
 	SET_SYSTEM_SLEEP_PM_OPS(virtio_pci_freeze, virtio_pci_restore)
 };
