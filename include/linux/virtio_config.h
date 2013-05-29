@@ -270,4 +270,23 @@ static inline void virtio_cwrite64(struct virtio_device *vdev,
 		_r;							\
 	})
 
+/* Helpers for non-endian converting transports. */
+u16 virtio_config_get_noconv16(struct virtio_device *vdev, unsigned offset);
+u32 virtio_config_get_noconv32(struct virtio_device *vdev, unsigned offset);
+u64 virtio_config_get_noconv64(struct virtio_device *vdev, unsigned offset);
+void virtio_config_set_noconv16(struct virtio_device *vdev,
+				unsigned offset, u16 v);
+void virtio_config_set_noconv32(struct virtio_device *vdev,
+				unsigned offset, u32 v);
+void virtio_config_set_noconv64(struct virtio_device *vdev,
+				unsigned offset, u64 v);
+
+#define VIRTIO_CONFIG_OPS_NOCONV		\
+	.get16 = virtio_config_get_noconv16,	\
+	.set16 = virtio_config_set_noconv16,	\
+	.get32 = virtio_config_get_noconv32,	\
+	.set32 = virtio_config_set_noconv32,	\
+	.get64 = virtio_config_get_noconv64,	\
+	.set64 = virtio_config_set_noconv64
+
 #endif /* _LINUX_VIRTIO_CONFIG_H */

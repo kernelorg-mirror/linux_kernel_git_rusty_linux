@@ -219,6 +219,75 @@ out:
 }
 EXPORT_SYMBOL_GPL(register_virtio_device);
 
+static void noconv_get(struct virtio_device *vdev, unsigned offset,
+		       size_t len, void *p)
+{
+	u8 *buf = p;
+	while (len) {
+		*buf = virtio_cread8(vdev, offset);
+		buf++;
+		offset++;
+		len--;
+	}
+}
+
+u16 virtio_config_get_noconv16(struct virtio_device *vdev, unsigned offset)
+{
+	u16 v;
+	noconv_get(vdev, offset, sizeof(v), &v);
+	return v;
+}
+EXPORT_SYMBOL_GPL(virtio_config_get_noconv16);
+
+u32 virtio_config_get_noconv32(struct virtio_device *vdev, unsigned offset)
+{
+	u32 v;
+	noconv_get(vdev, offset, sizeof(v), &v);
+	return v;
+}
+EXPORT_SYMBOL_GPL(virtio_config_get_noconv32);
+
+u64 virtio_config_get_noconv64(struct virtio_device *vdev, unsigned offset)
+{
+	u64 v;
+	noconv_get(vdev, offset, sizeof(v), &v);
+	return v;
+}
+EXPORT_SYMBOL_GPL(virtio_config_get_noconv64);
+
+static void noconv_set(struct virtio_device *vdev, unsigned offset,
+		       size_t len, const void *p)
+{
+	const u8 *buf = p;
+	while (len) {
+		virtio_cwrite8(vdev, offset, *buf);
+		buf++;
+		offset++;
+		len--;
+	}
+}
+
+void virtio_config_set_noconv16(struct virtio_device *vdev,
+				unsigned offset, u16 v)
+{
+	noconv_set(vdev, offset, sizeof(v), &v);
+}
+EXPORT_SYMBOL_GPL(virtio_config_set_noconv16);
+
+void virtio_config_set_noconv32(struct virtio_device *vdev,
+				unsigned offset, u32 v)
+{
+	noconv_set(vdev, offset, sizeof(v), &v);
+}
+EXPORT_SYMBOL_GPL(virtio_config_set_noconv32);
+
+void virtio_config_set_noconv64(struct virtio_device *vdev,
+				unsigned offset, u64 v)
+{
+	noconv_set(vdev, offset, sizeof(v), &v);
+}
+EXPORT_SYMBOL_GPL(virtio_config_set_noconv64);
+
 void unregister_virtio_device(struct virtio_device *dev)
 {
 	int index = dev->index; /* save for after device release */
