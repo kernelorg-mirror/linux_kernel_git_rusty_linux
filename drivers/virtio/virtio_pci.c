@@ -140,57 +140,62 @@ static void vp_finalize_features(struct virtio_device *vdev)
 	iowrite32(vdev->features >> 32, &vp_dev->common->guest_feature);
 }
 
-/* virtio config->get() implementation */
-static void vp_get(struct virtio_device *vdev, unsigned offset,
-		   void *buf, unsigned len)
+/* virtio config is little-endian for virtio_pci (vs guest-endian for legacy) */
+static u8 vp_get8(struct virtio_device *vdev, unsigned offset)
 {
 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
-	void __iomem *ioaddr = vp_dev->device + offset;
-	u8 *ptr = buf;
-	int i;
 
-	for (i = 0; i < len; i++)
-		ptr[i] = ioread8(ioaddr + i);
+	return ioread8(vp_dev->device + offset);
 }
 
-#define VP_GETx(bits)							\
-static u##bits vp_get##bits(struct virtio_device *vdev, unsigned int offset) \
-{									\
-	u##bits v;							\
-	vp_get(vdev, offset, &v, sizeof(v));				\
-	return v;							\
-}
-
-VP_GETx(8)
-VP_GETx(16)
-VP_GETx(32)
-VP_GETx(64)
-
-/* the config->set() implementation.  it's symmetric to the config->get()
- * implementation */
-static void vp_set(struct virtio_device *vdev, unsigned offset,
-		   const void *buf, unsigned len)
+static void vp_set8(struct virtio_device *vdev, unsigned offset, u8 val)
 {
 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
-	void __iomem *ioaddr = vp_dev->device + offset;
-	const u8 *ptr = buf;
-	int i;
 
-	for (i = 0; i < len; i++)
-		iowrite8(ptr[i], ioaddr + i);
+	iowrite8(val, vp_dev->device + offset);
 }
 
-#define VP_SETx(bits)							\
-static void vp_set##bits(struct virtio_device *vdev, unsigned int offset, \
-			 u##bits v)					\
-{									\
-	vp_set(vdev, offset, &v, sizeof(v));				\
+static u16 vp_get16(struct virtio_device *vdev, unsigned offset)
+{
+	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
+
+	return ioread16(vp_dev->device + offset);
 }
 
-VP_SETx(8)
-VP_SETx(16)
-VP_SETx(32)
-VP_SETx(64)
+static void vp_set16(struct virtio_device *vdev, unsigned offset, u16 val)
+{
+	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
+
+	iowrite16(val, vp_dev->device + offset);
+}
+
+static u32 vp_get32(struct virtio_device *vdev, unsigned offset)
+{
+	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
+
+	return ioread32(vp_dev->device + offset);
+}
+
+static void vp_set32(struct virtio_device *vdev, unsigned offset, u32 val)
+{
+	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
+
+	iowrite32(val, vp_dev->device + offset);
+}
+
+static u64 vp_get64(struct virtio_device *vdev, unsigned offset)
+{
+	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
+
+	return ioread64_twopart(vp_dev->device + offset);
+}
+
+static void vp_set64(struct virtio_device *vdev, unsigned offset, u64 val)
+{
+	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
+
+	iowrite64_twopart(val, vp_dev->device + offset);
+}
 
 /* config->{get,set}_status() implementations */
 static u8 vp_get_status(struct virtio_device *vdev)
