@@ -36,8 +36,8 @@
  * SUCH DAMAGE.
  */
 
-#ifndef _LINUX_VIRTIO_PCI_H
-#define _LINUX_VIRTIO_PCI_H
+#ifndef _UAPI_LINUX_VIRTIO_PCI_H
+#define _UAPI_LINUX_VIRTIO_PCI_H
 
 #include <linux/virtio_config.h>
 
@@ -152,4 +152,4 @@ struct virtio_pci_common_cfg {
 	__le16 queue_msix_vector;/* read-write */
 	__le64 queue_address;	/* read-write: 0xFFFFFFFFFFFFFFFF == DNE. */
 };
-#endif
+#endif /* _UAPI_LINUX_VIRTIO_PCI_H */
