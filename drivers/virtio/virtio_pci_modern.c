@@ -22,6 +22,7 @@
 #include <linux/virtio_pci.h>
 #include <linux/highmem.h>
 #include <linux/spinlock.h>
+#include <linux/delay.h>
 #include "virtio_pci-common.h"
 
 MODULE_AUTHOR("Rusty Russell <rusty@rustcorp.com.au>");
@@ -191,6 +192,30 @@ static void *alloc_virtqueue_pages(u16 *num)
 	return NULL;
 }
 
+static bool vp_vq_disable(struct virtio_pci_device *vp_dev, u16 vq_index)
+{
+	unsigned int msec = 0;
+
+	/* Select the queue */
+	iowrite16(vq_index, &vp_dev->common->queue_select);
+
+	/* Disable it */
+ 	iowrite16(0, &vp_dev->common->queue_enable);
+
+	/* It's almost certainly synchronous, but just in case. */
+	while (ioread16(&vp_dev->common->queue_enable) != 0) {
+		if (msec > 500) {
+			dev_warn(&vp_dev->pci_dev->dev,
+				 "virtio_pci: disable ignored on vq %u\n",
+				 vq_index);
+			return false;
+		}
+		msleep(10);
+		msec += 10;
+	}
+	return true;
+}
+
 static struct virtqueue *setup_vq(struct virtio_pci_device *vp_dev,
 				  unsigned index,
 				  void (*callback)(struct virtqueue *vq),
@@ -209,13 +234,12 @@ static struct virtqueue *setup_vq(struct virtio_pci_device *vp_dev,
 	/* Select the queue we're interested in */
 	iowrite16(index, &cfg->queue_select);
 
-	/* Sanity check */
-	switch (ioread64_twopart(&cfg->queue_desc_lo, &cfg->queue_desc_hi)) {
-		/* Uninitialized.  Excellent. */
-		break;
-	default:
-		/* We've already set this up? */
-		return ERR_PTR(-EBUSY);
+	/* Should be disabled, but maybe kexec? */
+	if (ioread8(&cfg->queue_enable)) {
+		dev_warn(&vp_dev->pci_dev->dev, "queue %u already enabled",
+			 index);
+		if (!vp_vq_disable(vp_dev, index))
+			return ERR_PTR(-EBUSY);
 	}
 
 	/* Maximum size must be a power of 2. */
@@ -304,29 +328,6 @@ out_info:
 	return ERR_PTR(err);
 }
 
-static void vp_vq_disable(struct virtio_pci_device *vp_dev,
-			  struct virtqueue *vq)
-{
-	unsigned long end;
-
-	/* Select the queue */
-	iowrite16(vq->index, &vp_dev->common->queue_select);
-
-	/* Disable it */
- 	iowrite16(0, &vp_dev->common->queue_enable);
-
-	/* It's almost certainly synchronous, but just in case. */
-	end = jiffies + HZ/2;
-	while (ioread16(&vp_dev->common->queue_enable) != 0) {
-		if (time_after(jiffies, end)) {
-			dev_warn(&vp_dev->pci_dev->dev,
-				 "virtio_pci: disable ignored\n");
-			break;
-		}
-		cpu_relax();
-	}
-}
-
 static void del_vq(struct virtqueue *vq)
 {
 	struct virtio_pci_device *vp_dev = to_vp_device(vq->vdev);
@@ -338,7 +339,7 @@ static void del_vq(struct virtqueue *vq)
 	spin_unlock_irqrestore(&vp_dev->lock, flags);
 
 	/* It should be quiescent, but disable first just in case. */
-	vp_vq_disable(vp_dev, vq);
+	vp_vq_disable(vp_dev, vq->index);
 
 	/* Select the queue */
 	iowrite16(vq->index, &vp_dev->common->queue_select);
@@ -354,9 +355,6 @@ static void del_vq(struct virtqueue *vq)
 
 	/* This is for our own benefit, not the device's! */
 	iowrite16(info->desired_num, &vp_dev->common->queue_size);
-	iowrite64_twopart(0, &vp_dev->common->queue_desc_lo, &vp_dev->common->queue_desc_hi);
-	iowrite64_twopart(0, &vp_dev->common->queue_avail_lo, &vp_dev->common->queue_avail_hi);
-	iowrite64_twopart(0, &vp_dev->common->queue_used_lo, &vp_dev->common->queue_used_hi);
 
 	free_pages_exact(info->queue, size);
 	kfree(info);
