@@ -20,15 +20,20 @@ static inline int virtio_pci_find_capability(struct pci_dev *dev, u8 cfg_type,
 	for (pos = pci_find_capability(dev, PCI_CAP_ID_VNDR);
 	     pos > 0;
 	     pos = pci_find_next_capability(dev, pos, PCI_CAP_ID_VNDR)) {
-		u8 type, bar;
+		u8 type_and_bar, type, bar;
 		pci_read_config_byte(dev, pos + offsetof(struct virtio_pci_cap,
-							 cfg_type), &type);
-		if (type != cfg_type)
-			continue;
-		pci_read_config_byte(dev, pos + offsetof(struct virtio_pci_cap,
-							 bar), &bar);
-		if (pci_resource_flags(dev, bar) & ioresource_types)
-			return pos;
+							 type_and_bar),
+				     &type_and_bar);
+
+		type = (type_and_bar >> VIRTIO_PCI_CAP_TYPE_SHIFT) &
+			VIRTIO_PCI_CAP_TYPE_MASK;
+		bar = (type_and_bar >> VIRTIO_PCI_CAP_BAR_SHIFT) &
+			VIRTIO_PCI_CAP_BAR_MASK;
+
+		if (type == cfg_type) {
+			if (pci_resource_flags(dev, bar) & ioresource_types)
+				return pos;
+		}
 	}
 	return 0;
 }

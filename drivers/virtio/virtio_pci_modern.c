@@ -419,16 +419,17 @@ static void virtio_pci_release_dev(struct device *_d)
 static void __iomem *map_capability(struct pci_dev *dev, int off, size_t minlen,
 				    size_t *len)
 {
-	u8 bar;
+	u8 type_and_bar, bar;
 	u32 offset, length;
 	void __iomem *p;
 
-	pci_read_config_byte(dev, off + offsetof(struct virtio_pci_cap, bar),
-			     &bar);
+	pci_read_config_byte(dev, off + offsetof(struct virtio_pci_cap,
+						 type_and_bar),
+			     &type_and_bar);
 	pci_read_config_dword(dev, off + offsetof(struct virtio_pci_cap, offset),
 			     &offset);
 	pci_read_config_dword(dev, off + offsetof(struct virtio_pci_cap, length),
-			     &length);
+			      &length);
 
 	if (length < minlen) {
 		dev_err(&dev->dev,
@@ -439,6 +440,9 @@ static void __iomem *map_capability(struct pci_dev *dev, int off, size_t minlen,
 
 	if (len)
 		*len = length;
+
+	bar = (type_and_bar >> VIRTIO_PCI_CAP_BAR_SHIFT) &
+		VIRTIO_PCI_CAP_BAR_MASK;
 
 	/* We want uncachable mapping, even if bar is cachable. */
 	p = pci_iomap_range(dev, bar, offset, length, PAGE_SIZE, true);

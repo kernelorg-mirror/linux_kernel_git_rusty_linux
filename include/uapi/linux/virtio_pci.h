@@ -127,14 +127,19 @@
 
 /* This is the PCI capability header: */
 struct virtio_pci_cap {
-	__u8 cap_vndr;	/* Generic PCI field: PCI_CAP_ID_VNDR */
-	__u8 cap_next;	/* Generic PCI field: next ptr. */
-	__u8 cap_len;	/* Generic PCI field: capability length */
-	__u8 cfg_type;	/* One of the VIRTIO_PCI_CAP_*_CFG. */
-	__u8 bar;		/* Where to find it. */
-	__le32 offset;	/* Offset within bar. */
-	__le32 length;	/* Length. */
+	__u8 cap_vndr;		/* Generic PCI field: PCI_CAP_ID_VNDR */
+	__u8 cap_next;		/* Generic PCI field: next ptr. */
+	__u8 cap_len;		/* Generic PCI field: capability length */
+	__u8 type_and_bar;	/* Upper 3 bits: bar.
+				 * Lower 3 is VIRTIO_PCI_CAP_*_CFG. */
+	__le32 offset;		/* Offset within bar. */
+	__le32 length;		/* Length. */
 };
+
+#define VIRTIO_PCI_CAP_BAR_SHIFT	5
+#define VIRTIO_PCI_CAP_BAR_MASK		0x7
+#define VIRTIO_PCI_CAP_TYPE_SHIFT	0
+#define VIRTIO_PCI_CAP_TYPE_MASK	0x7
 
 struct virtio_pci_notify_cap {
 	struct virtio_pci_cap cap;
