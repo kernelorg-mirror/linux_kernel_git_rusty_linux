@@ -37,17 +37,16 @@ static DEFINE_PCI_DEVICE_TABLE(virtio_pci_id_table) = {
 
 MODULE_DEVICE_TABLE(pci, virtio_pci_id_table);
 
-/* There is no general iowrite64.  We use two 32-bit ops. */
-static void iowrite64_twopart(u64 val, const __le64 *addr)
+static void iowrite64_twopart(u64 val, __le32 *lo, __le32 *hi)
 {
-	iowrite32((u32)val, (__le32 *)addr);
-	iowrite32(val >> 32, (__le32 *)addr + 1);
+	iowrite32((u32)val, lo);
+	iowrite32(val >> 32, hi);
 }
 
 /* There is no ioread64.  We use two 32-bit ops. */
-static u64 ioread64_twopart(__le64 *addr)
+static u64 ioread64_twopart(__le32 *lo, __le32 *hi)
 {
-	return ioread32(addr) | ((u64)ioread32((__le32 *)addr + 1) << 32);
+	return ioread32(lo) | ((u64)ioread32(hi) << 32);
 }
 
 /* config->{get,set}_status() implementations */
@@ -145,14 +144,16 @@ static u64 vp_get64(struct virtio_device *vdev, unsigned offset)
 {
 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
 
-	return ioread64_twopart(vp_dev->device + offset);
+	return ioread64_twopart(vp_dev->device + offset,
+				vp_dev->device + offset + 4);
 }
 
 static void vp_set64(struct virtio_device *vdev, unsigned offset, u64 val)
 {
 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
 
-	iowrite64_twopart(val, vp_dev->device + offset);
+	iowrite64_twopart(val, vp_dev->device + offset,
+			  vp_dev->device + offset + 4);
 }
 
 static void vp_reset(struct virtio_device *vdev)
@@ -198,17 +199,18 @@ static struct virtqueue *setup_vq(struct virtio_pci_device *vp_dev,
 {
 	struct virtio_pci_vq_info *info;
 	struct virtqueue *vq;
+	struct virtio_pci_common_cfg __iomem *cfg = vp_dev->common;
 	u16 num, off;
 	int err;
 
-	if (index >= ioread16(&vp_dev->common->num_queues))
+	if (index >= ioread16(&cfg->num_queues))
 		return ERR_PTR(-ENOENT);
 
 	/* Select the queue we're interested in */
-	iowrite16(index, &vp_dev->common->queue_select);
+	iowrite16(index, &cfg->queue_select);
 
 	/* Sanity check */
-	switch (ioread64_twopart(&vp_dev->common->queue_desc)) {
+	switch (ioread64_twopart(&cfg->queue_desc_lo, &cfg->queue_desc_hi)) {
 		/* Uninitialized.  Excellent. */
 		break;
 	default:
@@ -217,7 +219,7 @@ static struct virtqueue *setup_vq(struct virtio_pci_device *vp_dev,
 	}
 
 	/* Maximum size must be a power of 2. */
-	num = ioread16(&vp_dev->common->queue_size);
+	num = ioread16(&cfg->queue_size);
 	if (num & (num - 1)) {
 		dev_warn(&vp_dev->pci_dev->dev, "bad queue size %u", num);
 		return ERR_PTR(-EINVAL);
@@ -233,7 +235,7 @@ static struct virtqueue *setup_vq(struct virtio_pci_device *vp_dev,
 	info->desired_num = num;
 
 	/* get offset of notification word for this vq (shouldn't wrap) */
-	off = ioread16(&vp_dev->common->queue_notify_off);
+	off = ioread16(&cfg->queue_notify_off);
 	if ((u64)off * vp_dev->notify_offset_multiplier + 2
 	    > vp_dev->notify_len) {
 		dev_warn(&vp_dev->pci_dev->dev,
@@ -264,8 +266,8 @@ static struct virtqueue *setup_vq(struct virtio_pci_device *vp_dev,
 	info->vq = vq;
 
 	if (msix_vec != VIRTIO_MSI_NO_VECTOR) {
-		iowrite16(msix_vec, &vp_dev->common->queue_msix_vector);
-		msix_vec = ioread16(&vp_dev->common->queue_msix_vector);
+		iowrite16(msix_vec, &cfg->queue_msix_vector);
+		msix_vec = ioread16(&cfg->queue_msix_vector);
 		if (msix_vec == VIRTIO_MSI_NO_VECTOR) {
 			err = -EBUSY;
 			goto out_new_virtqueue;
@@ -282,14 +284,14 @@ static struct virtqueue *setup_vq(struct virtio_pci_device *vp_dev,
 	}
 
 	/* Activate the queue. */
-	iowrite16(num, &vp_dev->common->queue_size);
+	iowrite16(num, &cfg->queue_size);
 	iowrite64_twopart(virt_to_phys(vq->vring.desc),
-			  &vp_dev->common->queue_desc);
+			  &cfg->queue_desc_lo, &cfg->queue_desc_hi);
 	iowrite64_twopart(virt_to_phys(vq->vring.avail),
-			  &vp_dev->common->queue_avail);
+			  &cfg->queue_avail_lo, &cfg->queue_avail_hi);
 	iowrite64_twopart(virt_to_phys(vq->vring.used),
-			  &vp_dev->common->queue_used);
-	iowrite8(1, &vp_dev->common->queue_enable);
+			  &cfg->queue_used_lo, &cfg->queue_used_hi);
+	iowrite8(1, &cfg->queue_enable);
 
 	return vq;
 
@@ -352,9 +354,9 @@ static void del_vq(struct virtqueue *vq)
 
 	/* This is for our own benefit, not the device's! */
 	iowrite16(info->desired_num, &vp_dev->common->queue_size);
-	iowrite64_twopart(0, &vp_dev->common->queue_desc);
-	iowrite64_twopart(0, &vp_dev->common->queue_avail);
-	iowrite64_twopart(0, &vp_dev->common->queue_used);
+	iowrite64_twopart(0, &vp_dev->common->queue_desc_lo, &vp_dev->common->queue_desc_hi);
+	iowrite64_twopart(0, &vp_dev->common->queue_avail_lo, &vp_dev->common->queue_avail_hi);
+	iowrite64_twopart(0, &vp_dev->common->queue_used_lo, &vp_dev->common->queue_used_hi);
 
 	free_pages_exact(info->queue, size);
 	kfree(info);

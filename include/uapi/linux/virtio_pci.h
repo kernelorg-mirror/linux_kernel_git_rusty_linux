@@ -159,8 +159,11 @@ struct virtio_pci_common_cfg {
 	__le16 queue_msix_vector;	/* read-write */
 	__le16 queue_enable;		/* read-write */
 	__le16 queue_notify_off;	/* read-only */
-	__le64 queue_desc;		/* read-write */
-	__le64 queue_avail;		/* read-write */
-	__le64 queue_used;		/* read-write */
+	__le32 queue_desc_lo;		/* read-write */
+	__le32 queue_desc_hi;		/* read-write */
+	__le32 queue_avail_lo;		/* read-write */
+	__le32 queue_avail_hi;		/* read-write */
+	__le32 queue_used_lo;		/* read-write */
+	__le32 queue_used_hi;		/* read-write */
 };
 #endif /* _UAPI_LINUX_VIRTIO_PCI_H */
