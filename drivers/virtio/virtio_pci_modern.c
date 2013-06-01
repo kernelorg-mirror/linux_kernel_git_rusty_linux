@@ -38,14 +38,14 @@ static DEFINE_PCI_DEVICE_TABLE(virtio_pci_id_table) = {
 
 MODULE_DEVICE_TABLE(pci, virtio_pci_id_table);
 
-static void iowrite64_twopart(u64 val, __le32 *lo, __le32 *hi)
+static void iowrite64_twopart(u64 val, __le32 __iomem *lo, __le32 __iomem *hi)
 {
 	iowrite32((u32)val, lo);
 	iowrite32(val >> 32, hi);
 }
 
 /* There is no ioread64.  We use two 32-bit ops. */
-static u64 ioread64_twopart(__le32 *lo, __le32 *hi)
+static u64 ioread64_twopart(__le32 __iomem *lo, __le32 __iomem *hi)
 {
 	return ioread32(lo) | ((u64)ioread32(hi) << 32);
 }
