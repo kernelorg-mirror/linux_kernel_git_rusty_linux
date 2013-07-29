@@ -72,13 +72,12 @@ enum {
 struct vhost_net_ubuf_ref {
 	struct kref kref;
 	wait_queue_head_t wait;
-	struct vhost_virtqueue *vq;
+	struct vhost_net_virtqueue *nvq;
 };
 
 struct vhost_ubuf_info {
 	struct ubuf_info ubuf;
-	void *ctx;
-	unsigned long desc;
+	struct vhost_net_ubuf_ref *ubufs;
 };
 
 struct vhost_net_virtqueue {
@@ -131,7 +130,7 @@ static void vhost_net_zerocopy_done_signal(struct kref *kref)
 }
 
 static struct vhost_net_ubuf_ref *
-vhost_net_ubuf_alloc(struct vhost_virtqueue *vq, bool zcopy)
+vhost_net_ubuf_alloc(struct vhost_net_virtqueue *nvq, bool zcopy)
 {
 	struct vhost_net_ubuf_ref *ubufs;
 	/* No zero copy backend? Nothing to count. */
@@ -142,7 +141,7 @@ vhost_net_ubuf_alloc(struct vhost_virtqueue *vq, bool zcopy)
 		return ERR_PTR(-ENOMEM);
 	kref_init(&ubufs->kref);
 	init_waitqueue_head(&ubufs->wait);
-	ubufs->vq = vq;
+	ubufs->nvq = nvq;
 	return ubufs;
 }
 
@@ -308,12 +307,16 @@ static int vhost_zerocopy_signal_used(struct vhost_net *net,
 
 static void vhost_zerocopy_callback(struct ubuf_info *ubuf, bool success)
 {
-	struct vhost_ubuf_info *vubuf = container_of(ubuf, 
-						     struct vhost_ubuf_info,
-						     ubuf);
-	struct vhost_net_ubuf_ref *ubufs = vubuf->ctx;
-	struct vhost_virtqueue *vq = ubufs->vq;
-	int cnt = atomic_read(&ubufs->kref.refcount);
+	struct vhost_ubuf_info *vubuf;
+	struct vhost_net_ubuf_ref *ubufs;
+	struct vhost_virtqueue *vq;
+	int cnt, desc;
+
+	vubuf = container_of(ubuf, struct vhost_ubuf_info, ubuf);
+	ubufs = vubuf->ubufs;
+	vq = &ubufs->nvq->vq;
+	desc = vubuf - ubufs->nvq->ubuf_info;
+	cnt = atomic_read(&ubufs->kref.refcount);
 
 	/*
 	 * Trigger polling thread if guest stopped submitting new buffers:
@@ -326,7 +329,7 @@ static void vhost_zerocopy_callback(struct ubuf_info *ubuf, bool success)
 	if (cnt <= 2 || !(cnt % 16))
 		vhost_poll_queue(&vq->poll);
 	/* set len to mark this desc buffers done DMA */
-	vq->heads[vubuf->desc].len = success ?
+	vq->heads[desc].len = success ?
 		VHOST_DMA_DONE_LEN : VHOST_DMA_FAILED_LEN;
 	vhost_net_ubuf_put(ubufs);
 }
@@ -432,8 +435,7 @@ static void handle_tx(struct vhost_net *net)
 				vq->heads[nvq->upend_idx].len =
 					VHOST_DMA_IN_PROGRESS;
 				vubuf->ubuf.callback = vhost_zerocopy_callback;
-				vubuf->ctx = nvq->ubufs;
-				vubuf->desc = nvq->upend_idx;
+				vubuf->ubufs = nvq->ubufs;
 				msg.msg_control = vubuf;
 				/* Ignored, but fill in for completeness. */
 				msg.msg_controllen = sizeof(*vubuf);
@@ -931,7 +933,7 @@ static long vhost_net_set_backend(struct vhost_net *n, unsigned index, int fd)
 	/* start polling new socket */
 	oldsock = vq->private_data;
 	if (sock != oldsock) {
-		ubufs = vhost_net_ubuf_alloc(vq,
+		ubufs = vhost_net_ubuf_alloc(nvq,
 					     sock && vhost_sock_zcopy(sock));
 		if (IS_ERR(ubufs)) {
 			r = PTR_ERR(ubufs);
