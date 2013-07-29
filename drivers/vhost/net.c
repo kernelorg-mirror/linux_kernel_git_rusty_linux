@@ -78,6 +78,7 @@ struct vhost_net_ubuf_ref {
 struct vhost_ubuf_info {
 	struct ubuf_info ubuf;
 	struct vhost_net_ubuf_ref *ubufs;
+	int desc;
 };
 
 struct vhost_net_virtqueue {
@@ -93,8 +94,6 @@ struct vhost_net_virtqueue {
 	int upend_idx;
 	/* first used idx for DMA done zerocopy buffers */
 	int done_idx;
-	/* an array of userspace buffers info */
-	struct vhost_ubuf_info *ubuf_info;
 	/* Reference counting for outstanding ubufs.
 	 * Protected by vq mutex. Writers must also take device mutex. */
 	struct vhost_net_ubuf_ref *ubufs;
@@ -115,6 +114,7 @@ struct vhost_net {
 };
 
 static unsigned vhost_net_zcopy_mask __read_mostly;
+static struct kmem_cache *ubuf_cache __read_mostly;
 
 static void vhost_net_enable_zcopy(int vq)
 {
@@ -162,42 +162,9 @@ static void vhost_net_ubuf_put_wait_and_free(struct vhost_net_ubuf_ref *ubufs)
 	kfree(ubufs);
 }
 
-static void vhost_net_clear_ubuf_info(struct vhost_net *n)
-{
-	int i;
-
-	for (i = 0; i < VHOST_NET_VQ_MAX; ++i) {
-		kfree(n->vqs[i].ubuf_info);
-		n->vqs[i].ubuf_info = NULL;
-	}
-}
-
-static int vhost_net_set_ubuf_info(struct vhost_net *n)
-{
-	bool zcopy;
-	int i;
-
-	for (i = 0; i < VHOST_NET_VQ_MAX; ++i) {
-		zcopy = vhost_net_zcopy_mask & (0x1 << i);
-		if (!zcopy)
-			continue;
-		n->vqs[i].ubuf_info = kmalloc(sizeof(*n->vqs[i].ubuf_info) *
-					      UIO_MAXIOV, GFP_KERNEL);
-		if  (!n->vqs[i].ubuf_info)
-			goto err;
-	}
-	return 0;
-
-err:
-	vhost_net_clear_ubuf_info(n);
-	return -ENOMEM;
-}
-
 static void vhost_net_vq_reset(struct vhost_net *n)
 {
 	int i;
-
-	vhost_net_clear_ubuf_info(n);
 
 	for (i = 0; i < VHOST_NET_VQ_MAX; i++) {
 		n->vqs[i].done_idx = 0;
@@ -310,12 +277,11 @@ static void vhost_zerocopy_callback(struct ubuf_info *ubuf, bool success)
 	struct vhost_ubuf_info *vubuf;
 	struct vhost_net_ubuf_ref *ubufs;
 	struct vhost_virtqueue *vq;
-	int cnt, desc;
+	int cnt;
 
 	vubuf = container_of(ubuf, struct vhost_ubuf_info, ubuf);
 	ubufs = vubuf->ubufs;
 	vq = &ubufs->nvq->vq;
-	desc = vubuf - ubufs->nvq->ubuf_info;
 	cnt = atomic_read(&ubufs->kref.refcount);
 
 	/*
@@ -329,9 +295,10 @@ static void vhost_zerocopy_callback(struct ubuf_info *ubuf, bool success)
 	if (cnt <= 2 || !(cnt % 16))
 		vhost_poll_queue(&vq->poll);
 	/* set len to mark this desc buffers done DMA */
-	vq->heads[desc].len = success ?
+	vq->heads[vubuf->desc].len = success ?
 		VHOST_DMA_DONE_LEN : VHOST_DMA_FAILED_LEN;
 	vhost_net_ubuf_put(ubufs);
+	kmem_cache_free(ubuf_cache, vubuf);
 }
 
 /* Expects to be always run from workqueue - which acts as
@@ -419,9 +386,14 @@ static void handle_tx(struct vhost_net *net)
 
 		/* use msg_control to pass vhost zerocopy ubuf info to skb */
 		if (zcopy_used) {
+			struct vhost_ubuf_info *vubuf;
+
 			vq->heads[nvq->upend_idx].id = head;
+
 			if (!vhost_net_tx_select_zcopy(net) ||
-			    len < VHOST_GOODCOPY_LEN) {
+			    len < VHOST_GOODCOPY_LEN
+			    || !(vubuf = kmem_cache_alloc(ubuf_cache,
+							  GFP_KERNEL))) {
 				/* copy don't need to wait for DMA done */
 				vq->heads[nvq->upend_idx].len =
 							VHOST_DMA_DONE_LEN;
@@ -429,13 +401,11 @@ static void handle_tx(struct vhost_net *net)
 				msg.msg_controllen = 0;
 				ubufs = NULL;
 			} else {
-				struct vhost_ubuf_info *vubuf;
-				vubuf = nvq->ubuf_info + nvq->upend_idx;
-
 				vq->heads[nvq->upend_idx].len =
 					VHOST_DMA_IN_PROGRESS;
 				vubuf->ubuf.callback = vhost_zerocopy_callback;
 				vubuf->ubufs = nvq->ubufs;
+				vubuf->desc = nvq->upend_idx;
 				msg.msg_control = vubuf;
 				/* Ignored, but fill in for completeness. */
 				msg.msg_controllen = sizeof(*vubuf);
@@ -720,7 +690,6 @@ static int vhost_net_open(struct inode *inode, struct file *f)
 	n->vqs[VHOST_NET_VQ_RX].vq.handle_kick = handle_rx_kick;
 	for (i = 0; i < VHOST_NET_VQ_MAX; i++) {
 		n->vqs[i].ubufs = NULL;
-		n->vqs[i].ubuf_info = NULL;
 		n->vqs[i].upend_idx = 0;
 		n->vqs[i].done_idx = 0;
 		n->vqs[i].vhost_hlen = 0;
@@ -1062,12 +1031,7 @@ static long vhost_net_set_owner(struct vhost_net *n)
 		r = -EBUSY;
 		goto out;
 	}
-	r = vhost_net_set_ubuf_info(n);
-	if (r)
-		goto out;
 	r = vhost_dev_set_owner(&n->dev);
-	if (r)
-		vhost_net_clear_ubuf_info(n);
 	vhost_net_flush(n);
 out:
 	mutex_unlock(&n->dev.mutex);
@@ -1143,15 +1107,24 @@ static struct miscdevice vhost_net_misc = {
 
 static int vhost_net_init(void)
 {
+	int ret;
+
 	if (experimental_zcopytx)
 		vhost_net_enable_zcopy(VHOST_NET_VQ_TX);
-	return misc_register(&vhost_net_misc);
+	ubuf_cache = KMEM_CACHE(vhost_ubuf_info, 0);
+	if (!ubuf_cache)
+		return -ENOMEM;
+	ret = misc_register(&vhost_net_misc);
+	if (ret != 0)
+		kmem_cache_destroy(ubuf_cache);
+	return ret;
 }
 module_init(vhost_net_init);
 
 static void vhost_net_exit(void)
 {
 	misc_deregister(&vhost_net_misc);
+	kmem_cache_destroy(ubuf_cache);
 }
 module_exit(vhost_net_exit);
 
