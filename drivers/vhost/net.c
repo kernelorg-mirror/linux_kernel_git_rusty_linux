@@ -75,6 +75,12 @@ struct vhost_net_ubuf_ref {
 	struct vhost_virtqueue *vq;
 };
 
+struct vhost_ubuf_info {
+	struct ubuf_info ubuf;
+	void *ctx;
+	unsigned long desc;
+};
+
 struct vhost_net_virtqueue {
 	struct vhost_virtqueue vq;
 	/* hdr is used to store the virtio header.
@@ -89,7 +95,7 @@ struct vhost_net_virtqueue {
 	/* first used idx for DMA done zerocopy buffers */
 	int done_idx;
 	/* an array of userspace buffers info */
-	struct ubuf_info *ubuf_info;
+	struct vhost_ubuf_info *ubuf_info;
 	/* Reference counting for outstanding ubufs.
 	 * Protected by vq mutex. Writers must also take device mutex. */
 	struct vhost_net_ubuf_ref *ubufs;
@@ -302,7 +308,10 @@ static int vhost_zerocopy_signal_used(struct vhost_net *net,
 
 static void vhost_zerocopy_callback(struct ubuf_info *ubuf, bool success)
 {
-	struct vhost_net_ubuf_ref *ubufs = ubuf->ctx;
+	struct vhost_ubuf_info *vubuf = container_of(ubuf, 
+						     struct vhost_ubuf_info,
+						     ubuf);
+	struct vhost_net_ubuf_ref *ubufs = vubuf->ctx;
 	struct vhost_virtqueue *vq = ubufs->vq;
 	int cnt = atomic_read(&ubufs->kref.refcount);
 
@@ -317,7 +326,7 @@ static void vhost_zerocopy_callback(struct ubuf_info *ubuf, bool success)
 	if (cnt <= 2 || !(cnt % 16))
 		vhost_poll_queue(&vq->poll);
 	/* set len to mark this desc buffers done DMA */
-	vq->heads[ubuf->desc].len = success ?
+	vq->heads[vubuf->desc].len = success ?
 		VHOST_DMA_DONE_LEN : VHOST_DMA_FAILED_LEN;
 	vhost_net_ubuf_put(ubufs);
 }
@@ -417,16 +426,17 @@ static void handle_tx(struct vhost_net *net)
 				msg.msg_controllen = 0;
 				ubufs = NULL;
 			} else {
-				struct ubuf_info *ubuf;
-				ubuf = nvq->ubuf_info + nvq->upend_idx;
+				struct vhost_ubuf_info *vubuf;
+				vubuf = nvq->ubuf_info + nvq->upend_idx;
 
 				vq->heads[nvq->upend_idx].len =
 					VHOST_DMA_IN_PROGRESS;
-				ubuf->callback = vhost_zerocopy_callback;
-				ubuf->ctx = nvq->ubufs;
-				ubuf->desc = nvq->upend_idx;
-				msg.msg_control = ubuf;
-				msg.msg_controllen = sizeof(ubuf);
+				vubuf->ubuf.callback = vhost_zerocopy_callback;
+				vubuf->ctx = nvq->ubufs;
+				vubuf->desc = nvq->upend_idx;
+				msg.msg_control = vubuf;
+				/* Ignored, but fill in for completeness. */
+				msg.msg_controllen = sizeof(*vubuf);
 				ubufs = nvq->ubufs;
 				kref_get(&ubufs->kref);
 			}
