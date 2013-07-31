@@ -73,12 +73,19 @@ struct vhost_net_ubuf_ref {
 	struct kref kref;
 	wait_queue_head_t wait;
 	struct vhost_net_virtqueue *nvq;
+	/* Finished buffers, protected by lock. */
+	spinlock_t completed_lock;
+	struct list_head completed;
 };
 
 struct vhost_ubuf_info {
 	struct ubuf_info ubuf;
 	struct vhost_net_ubuf_ref *ubufs;
-	int desc;
+	int id;
+	/* Once we're complete, we know if we zero copied or not. */
+	bool success;
+	/* Once we're complete, we get put into ubufs->completed. */
+	struct list_head list;
 };
 
 struct vhost_net_virtqueue {
@@ -89,11 +96,6 @@ struct vhost_net_virtqueue {
 	struct iovec hdr[sizeof(struct virtio_net_hdr_mrg_rxbuf)];
 	size_t vhost_hlen;
 	size_t sock_hlen;
-	/* vhost zerocopy support fields below: */
-	/* last used idx for outstanding DMA zerocopy buffers */
-	int upend_idx;
-	/* first used idx for DMA done zerocopy buffers */
-	int done_idx;
 	/* Reference counting for outstanding ubufs.
 	 * Protected by vq mutex. Writers must also take device mutex. */
 	struct vhost_net_ubuf_ref *ubufs;
@@ -141,6 +143,8 @@ vhost_net_ubuf_alloc(struct vhost_net_virtqueue *nvq, bool zcopy)
 		return ERR_PTR(-ENOMEM);
 	kref_init(&ubufs->kref);
 	init_waitqueue_head(&ubufs->wait);
+	spin_lock_init(&ubufs->completed_lock);
+	INIT_LIST_HEAD(&ubufs->completed);
 	ubufs->nvq = nvq;
 	return ubufs;
 }
@@ -167,8 +171,6 @@ static void vhost_net_vq_reset(struct vhost_net *n)
 	int i;
 
 	for (i = 0; i < VHOST_NET_VQ_MAX; i++) {
-		n->vqs[i].done_idx = 0;
-		n->vqs[i].upend_idx = 0;
 		n->vqs[i].ubufs = NULL;
 		n->vqs[i].vhost_hlen = 0;
 		n->vqs[i].sock_hlen = 0;
@@ -243,33 +245,36 @@ static void copy_iovec_hdr(const struct iovec *from, struct iovec *to,
 	}
 }
 
-/* In case of DMA done not in order in lower device driver for some reason.
- * upend_idx is used to track end of used idx, done_idx is used to track head
- * of used idx. Once lower device DMA done contiguously, we will signal KVM
- * guest used idx.
+/*
+ * FIXME: kmap the pages so we can do vhost_add_used() directly in
+ * vhost_zerocopy_callback, and just do the vhost_signal() here.
  */
-static int vhost_zerocopy_signal_used(struct vhost_net *net,
-				      struct vhost_virtqueue *vq)
+static void vhost_zerocopy_signal_used(struct vhost_net *net,
+				       struct vhost_virtqueue *vq)
 {
+	struct list_head done = LIST_HEAD_INIT(done);
+	unsigned long flags;
+	bool some_used = false;
+	struct vhost_ubuf_info *i, *next;
 	struct vhost_net_virtqueue *nvq =
 		container_of(vq, struct vhost_net_virtqueue, vq);
-	int i;
-	int j = 0;
 
-	for (i = nvq->done_idx; i != nvq->upend_idx; i = (i + 1) % UIO_MAXIOV) {
-		if (vq->heads[i].len == VHOST_DMA_FAILED_LEN)
+	/* Empty the list */
+	spin_lock_irqsave(&nvq->ubufs->completed_lock, flags);
+	list_splice_init(&nvq->ubufs->completed, &done);
+	spin_unlock_irqrestore(&nvq->ubufs->completed_lock, flags);
+
+	list_for_each_entry_safe(i, next, &done, list) {
+		vhost_add_used(vq, i->id, 0);
+		/* FIXME: Do this in vhost_zerocopy_callback itself. */
+		if (!i->success)
 			vhost_net_tx_err(net);
-		if (VHOST_DMA_IS_DONE(vq->heads[i].len)) {
-			vq->heads[i].len = VHOST_DMA_CLEAR_LEN;
-			vhost_add_used_and_signal(vq->dev, vq,
-						  vq->heads[i].id, 0);
-			++j;
-		} else
-			break;
+		kmem_cache_free(ubuf_cache, i);
+		vhost_net_ubuf_put(nvq->ubufs);
+		some_used = true;
 	}
-	if (j)
-		nvq->done_idx = i;
-	return j;
+	if (some_used)
+		vhost_signal(vq->dev, vq);
 }
 
 static void vhost_zerocopy_callback(struct ubuf_info *ubuf, bool success)
@@ -277,12 +282,20 @@ static void vhost_zerocopy_callback(struct ubuf_info *ubuf, bool success)
 	struct vhost_ubuf_info *vubuf;
 	struct vhost_net_ubuf_ref *ubufs;
 	struct vhost_virtqueue *vq;
+	unsigned long flags;
 	int cnt;
 
 	vubuf = container_of(ubuf, struct vhost_ubuf_info, ubuf);
 	ubufs = vubuf->ubufs;
 	vq = &ubufs->nvq->vq;
 	cnt = atomic_read(&ubufs->kref.refcount);
+
+	vubuf->success = success;
+
+	/* FIXME: Is irqsave overkill? bh? */
+	spin_lock_irqsave(&ubufs->completed_lock, flags);
+	list_add_tail(&vubuf->list, &ubufs->completed);
+	spin_unlock_irqrestore(&ubufs->completed_lock, flags);
 
 	/*
 	 * Trigger polling thread if guest stopped submitting new buffers:
@@ -294,11 +307,6 @@ static void vhost_zerocopy_callback(struct ubuf_info *ubuf, bool success)
 	 */
 	if (cnt <= 2 || !(cnt % 16))
 		vhost_poll_queue(&vq->poll);
-	/* set len to mark this desc buffers done DMA */
-	vq->heads[vubuf->desc].len = success ?
-		VHOST_DMA_DONE_LEN : VHOST_DMA_FAILED_LEN;
-	vhost_net_ubuf_put(ubufs);
-	kmem_cache_free(ubuf_cache, vubuf);
 }
 
 /* Expects to be always run from workqueue - which acts as
@@ -321,8 +329,7 @@ static void handle_tx(struct vhost_net *net)
 	int err;
 	size_t hdr_size;
 	struct socket *sock;
-	struct vhost_net_ubuf_ref *uninitialized_var(ubufs);
-	bool zcopy, zcopy_used;
+	bool zcopy;
 
 	mutex_lock(&vq->mutex);
 	sock = vq->private_data;
@@ -335,6 +342,8 @@ static void handle_tx(struct vhost_net *net)
 	zcopy = nvq->ubufs;
 
 	for (;;) {
+		struct vhost_ubuf_info *vubuf;
+
 		/* Release DMAs done buffers first */
 		if (zcopy)
 			vhost_zerocopy_signal_used(net, vq);
@@ -348,15 +357,11 @@ static void handle_tx(struct vhost_net *net)
 			break;
 		/* Nothing new?  Wait for eventfd to tell us they refilled. */
 		if (head == vq->num) {
-			int num_pends;
+			int num_pends = 0;
 
-			/* If more outstanding DMAs, queue the work.
-			 * Handle upend_idx wrap around
-			 */
-			num_pends = likely(nvq->upend_idx >= nvq->done_idx) ?
-				    (nvq->upend_idx - nvq->done_idx) :
-				    (nvq->upend_idx + UIO_MAXIOV -
-				     nvq->done_idx);
+			/* If more outstanding DMAs, queue the work. */
+			if (nvq->ubufs)
+				num_pends = atomic_read(&nvq->ubufs->kref.refcount);
 			if (unlikely(num_pends > VHOST_MAX_PEND))
 				break;
 			if (unlikely(vhost_enable_notify(&net->dev, vq))) {
@@ -381,48 +386,35 @@ static void handle_tx(struct vhost_net *net)
 			       iov_length(nvq->hdr, s), hdr_size);
 			break;
 		}
-		zcopy_used = zcopy && (len >= VHOST_GOODCOPY_LEN ||
-				       nvq->upend_idx != nvq->done_idx);
+
+		/* We try to allocate vubuf if we want zero copy */
+		if (zcopy && len >= VHOST_GOODCOPY_LEN &&
+		    vhost_net_tx_select_zcopy(net))
+			vubuf = kmem_cache_alloc(ubuf_cache, GFP_KERNEL);
+		else
+			vubuf = NULL;
 
 		/* use msg_control to pass vhost zerocopy ubuf info to skb */
-		if (zcopy_used) {
-			struct vhost_ubuf_info *vubuf;
+		if (vubuf) {
+			vubuf->id = head;
+			vubuf->ubuf.callback = vhost_zerocopy_callback;
+			vubuf->ubufs = nvq->ubufs;
 
-			vq->heads[nvq->upend_idx].id = head;
-
-			if (!vhost_net_tx_select_zcopy(net) ||
-			    len < VHOST_GOODCOPY_LEN
-			    || !(vubuf = kmem_cache_alloc(ubuf_cache,
-							  GFP_KERNEL))) {
-				/* copy don't need to wait for DMA done */
-				vq->heads[nvq->upend_idx].len =
-							VHOST_DMA_DONE_LEN;
-				msg.msg_control = NULL;
-				msg.msg_controllen = 0;
-				ubufs = NULL;
-			} else {
-				vq->heads[nvq->upend_idx].len =
-					VHOST_DMA_IN_PROGRESS;
-				vubuf->ubuf.callback = vhost_zerocopy_callback;
-				vubuf->ubufs = nvq->ubufs;
-				vubuf->desc = nvq->upend_idx;
-				msg.msg_control = vubuf;
-				/* Ignored, but fill in for completeness. */
-				msg.msg_controllen = sizeof(*vubuf);
-				ubufs = nvq->ubufs;
-				kref_get(&ubufs->kref);
-			}
-			nvq->upend_idx = (nvq->upend_idx + 1) % UIO_MAXIOV;
-		} else
+			msg.msg_control = vubuf;
+			/* Ignored, but fill in for completeness. */
+			msg.msg_controllen = sizeof(*vubuf);
+			kref_get(&nvq->ubufs->kref);
+		} else {
 			msg.msg_control = NULL;
+			msg.msg_controllen = 0;
+		}
+
 		/* TODO: Check specific error and bomb out unless ENOBUFS? */
 		err = sock->ops->sendmsg(NULL, sock, &msg, len);
 		if (unlikely(err < 0)) {
-			if (zcopy_used) {
-				if (ubufs)
-					vhost_net_ubuf_put(ubufs);
-				nvq->upend_idx = ((unsigned)nvq->upend_idx - 1)
-					% UIO_MAXIOV;
+			if (vubuf) {
+				kmem_cache_free(ubuf_cache, vubuf);
+				vhost_net_ubuf_put(nvq->ubufs);
 			}
 			vhost_discard_vq_desc(vq, 1);
 			break;
@@ -430,10 +422,8 @@ static void handle_tx(struct vhost_net *net)
 		if (err != len)
 			pr_debug("Truncated TX packet: "
 				 " len %d != %zd\n", err, len);
-		if (!zcopy_used)
+		if (!vubuf)
 			vhost_add_used_and_signal(&net->dev, vq, head, 0);
-		else
-			vhost_zerocopy_signal_used(net, vq);
 		total_len += len;
 		vhost_net_tx_packet(net);
 		if (unlikely(total_len >= VHOST_NET_WEIGHT)) {
@@ -690,8 +680,6 @@ static int vhost_net_open(struct inode *inode, struct file *f)
 	n->vqs[VHOST_NET_VQ_RX].vq.handle_kick = handle_rx_kick;
 	for (i = 0; i < VHOST_NET_VQ_MAX; i++) {
 		n->vqs[i].ubufs = NULL;
-		n->vqs[i].upend_idx = 0;
-		n->vqs[i].done_idx = 0;
 		n->vqs[i].vhost_hlen = 0;
 		n->vqs[i].sock_hlen = 0;
 	}
@@ -928,12 +916,8 @@ static long vhost_net_set_backend(struct vhost_net *n, unsigned index, int fd)
 
 	mutex_unlock(&vq->mutex);
 
-	if (oldubufs) {
+	if (oldubufs)
 		vhost_net_ubuf_put_wait_and_free(oldubufs);
-		mutex_lock(&vq->mutex);
-		vhost_zerocopy_signal_used(n, vq);
-		mutex_unlock(&vq->mutex);
-	}
 
 	if (oldsock) {
 		vhost_net_flush_vq(n, index);
