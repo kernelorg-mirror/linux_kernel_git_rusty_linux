@@ -1172,20 +1172,11 @@ vhost_scsi_set_endpoint(struct vhost_scsi *vs,
 	struct tcm_vhost_tpg *tpg;
 	struct tcm_vhost_tpg **vs_tpg;
 	struct vhost_virtqueue *vq;
-	int index, ret, i, len;
+	int ret, i, len;
 	bool match = false;
 
 	mutex_lock(&tcm_vhost_mutex);
 	mutex_lock(&vs->dev.mutex);
-
-	/* Verify that ring has been setup correctly. */
-	for (index = 0; index < vs->dev.nvqs; ++index) {
-		/* Verify that ring has been setup correctly. */
-		if (!vhost_vq_access_ok(&vs->vqs[index].vq)) {
-			ret = -EFAULT;
-			goto out;
-		}
-	}
 
 	len = sizeof(vs_tpg[0]) * VHOST_SCSI_MAX_TARGET;
 	vs_tpg = kzalloc(len, GFP_KERNEL);
@@ -1261,19 +1252,11 @@ vhost_scsi_clear_endpoint(struct vhost_scsi *vs,
 	struct tcm_vhost_tpg *tpg;
 	struct vhost_virtqueue *vq;
 	bool match = false;
-	int index, ret, i;
+	int ret, i;
 	u8 target;
 
 	mutex_lock(&tcm_vhost_mutex);
 	mutex_lock(&vs->dev.mutex);
-	/* Verify that ring has been setup correctly. */
-	for (index = 0; index < vs->dev.nvqs; ++index) {
-		if (!vhost_vq_access_ok(&vs->vqs[index].vq)) {
-			ret = -EFAULT;
-			goto err_dev;
-		}
-	}
-
 	if (!vs->vs_tpg) {
 		ret = 0;
 		goto err_dev;
@@ -1340,11 +1323,6 @@ static int vhost_scsi_set_features(struct vhost_scsi *vs, u64 features)
 		return -EOPNOTSUPP;
 
 	mutex_lock(&vs->dev.mutex);
-	if ((features & (1 << VHOST_F_LOG_ALL)) &&
-	    !vhost_log_access_ok(&vs->dev)) {
-		mutex_unlock(&vs->dev.mutex);
-		return -EFAULT;
-	}
 	vs->dev.acked_features = features;
 	smp_wmb();
 	vhost_scsi_flush(vs);
