@@ -69,22 +69,13 @@ enum {
 	VHOST_NET_VQ_MAX = 2,
 };
 
-struct vhost_net_ubuf_ref {
-	struct kref kref;
-	wait_queue_head_t wait;
-	struct vhost_net_virtqueue *nvq;
-	/* Finished buffers, protected by lock. */
-	spinlock_t completed_lock;
-	struct list_head completed;
-};
-
 struct vhost_ubuf_info {
 	struct ubuf_info ubuf;
-	struct vhost_net_ubuf_ref *ubufs;
+	struct vhost_net_virtqueue *nvq;
 	int id;
 	/* Once we're complete, we know if we zero copied or not. */
 	bool success;
-	/* Once we're complete, we get put into ubufs->completed. */
+	/* Once we're complete, we get put into nvq->completed. */
 	struct list_head list;
 };
 
@@ -96,9 +87,14 @@ struct vhost_net_virtqueue {
 	struct iovec hdr[sizeof(struct virtio_net_hdr_mrg_rxbuf)];
 	size_t vhost_hlen;
 	size_t sock_hlen;
-	/* Reference counting for outstanding ubufs.
+	/* Reference counting for outstanding ubufs.  Normally biassed at +1
+	 * unless we're actually waiting for a flush.
 	 * Protected by vq mutex. Writers must also take device mutex. */
-	struct vhost_net_ubuf_ref *ubufs;
+	struct kref ubuf_kref;
+	wait_queue_head_t ubuf_wait;
+	/* Finished buffers, protected by lock. */
+	spinlock_t completed_lock;
+	struct list_head completed;
 };
 
 struct vhost_net {
@@ -125,45 +121,15 @@ static void vhost_net_enable_zcopy(int vq)
 
 static void vhost_net_zerocopy_done_signal(struct kref *kref)
 {
-	struct vhost_net_ubuf_ref *ubufs;
+	struct vhost_net_virtqueue *nvq;
 
-	ubufs = container_of(kref, struct vhost_net_ubuf_ref, kref);
-	wake_up(&ubufs->wait);
+	nvq = container_of(kref, struct vhost_net_virtqueue, ubuf_kref);
+	wake_up(&nvq->ubuf_wait);
 }
 
-static struct vhost_net_ubuf_ref *
-vhost_net_ubuf_alloc(struct vhost_net_virtqueue *nvq, bool zcopy)
+static void vhost_net_ubuf_put(struct vhost_net_virtqueue *nvq)
 {
-	struct vhost_net_ubuf_ref *ubufs;
-	/* No zero copy backend? Nothing to count. */
-	if (!zcopy)
-		return NULL;
-	ubufs = kmalloc(sizeof(*ubufs), GFP_KERNEL);
-	if (!ubufs)
-		return ERR_PTR(-ENOMEM);
-	kref_init(&ubufs->kref);
-	init_waitqueue_head(&ubufs->wait);
-	spin_lock_init(&ubufs->completed_lock);
-	INIT_LIST_HEAD(&ubufs->completed);
-	ubufs->nvq = nvq;
-	return ubufs;
-}
-
-static void vhost_net_ubuf_put(struct vhost_net_ubuf_ref *ubufs)
-{
-	kref_put(&ubufs->kref, vhost_net_zerocopy_done_signal);
-}
-
-static void vhost_net_ubuf_put_and_wait(struct vhost_net_ubuf_ref *ubufs)
-{
-	kref_put(&ubufs->kref, vhost_net_zerocopy_done_signal);
-	wait_event(ubufs->wait, !atomic_read(&ubufs->kref.refcount));
-}
-
-static void vhost_net_ubuf_put_wait_and_free(struct vhost_net_ubuf_ref *ubufs)
-{
-	vhost_net_ubuf_put_and_wait(ubufs);
-	kfree(ubufs);
+	kref_put(&nvq->ubuf_kref, vhost_net_zerocopy_done_signal);
 }
 
 static void vhost_net_vq_reset(struct vhost_net *n)
@@ -171,11 +137,9 @@ static void vhost_net_vq_reset(struct vhost_net *n)
 	int i;
 
 	for (i = 0; i < VHOST_NET_VQ_MAX; i++) {
-		n->vqs[i].ubufs = NULL;
 		n->vqs[i].vhost_hlen = 0;
 		n->vqs[i].sock_hlen = 0;
 	}
-
 }
 
 static void vhost_net_tx_packet(struct vhost_net *net)
@@ -256,9 +220,9 @@ static void vhost_zerocopy_signal_used(struct vhost_net *net,
 		container_of(vq, struct vhost_net_virtqueue, vq);
 
 	/* Empty the list */
-	spin_lock_irqsave(&nvq->ubufs->completed_lock, flags);
-	list_splice_init(&nvq->ubufs->completed, &done);
-	spin_unlock_irqrestore(&nvq->ubufs->completed_lock, flags);
+	spin_lock_irqsave(&nvq->completed_lock, flags);
+	list_splice_init(&nvq->completed, &done);
+	spin_unlock_irqrestore(&nvq->completed_lock, flags);
 
 	list_for_each_entry_safe(i, next, &done, list) {
 		vhost_add_used(vq, i->id, 0);
@@ -266,7 +230,7 @@ static void vhost_zerocopy_signal_used(struct vhost_net *net,
 		if (!i->success)
 			vhost_net_tx_err(net);
 		kmem_cache_free(ubuf_cache, i);
-		vhost_net_ubuf_put(nvq->ubufs);
+		vhost_net_ubuf_put(nvq);
 		some_used = true;
 	}
 	if (some_used)
@@ -276,22 +240,22 @@ static void vhost_zerocopy_signal_used(struct vhost_net *net,
 static void vhost_zerocopy_callback(struct ubuf_info *ubuf, bool success)
 {
 	struct vhost_ubuf_info *vubuf;
-	struct vhost_net_ubuf_ref *ubufs;
+	struct vhost_net_virtqueue *nvq;
 	struct vhost_virtqueue *vq;
 	unsigned long flags;
 	int cnt;
 
 	vubuf = container_of(ubuf, struct vhost_ubuf_info, ubuf);
-	ubufs = vubuf->ubufs;
-	vq = &ubufs->nvq->vq;
-	cnt = atomic_read(&ubufs->kref.refcount);
+	nvq = vubuf->nvq;
+	vq = &nvq->vq;
+	cnt = atomic_read(&nvq->ubuf_kref.refcount);
 
 	vubuf->success = success;
 
 	/* FIXME: Is irqsave overkill? bh? */
-	spin_lock_irqsave(&ubufs->completed_lock, flags);
-	list_add_tail(&vubuf->list, &ubufs->completed);
-	spin_unlock_irqrestore(&ubufs->completed_lock, flags);
+	spin_lock_irqsave(&nvq->completed_lock, flags);
+	list_add_tail(&vubuf->list, &nvq->completed);
+	spin_unlock_irqrestore(&nvq->completed_lock, flags);
 
 	/*
 	 * Trigger polling thread if guest stopped submitting new buffers:
@@ -339,7 +303,7 @@ static void handle_tx(struct vhost_net *net)
 	vhost_disable_notify(&net->dev, vq);
 
 	hdr_size = nvq->vhost_hlen;
-	zcopy = nvq->ubufs;
+	zcopy = vhost_sock_zcopy(sock);
 
 	for (;;) {
 		struct vhost_ubuf_info *vubuf;
@@ -357,11 +321,10 @@ static void handle_tx(struct vhost_net *net)
 			break;
 		/* Nothing new?  Wait for eventfd to tell us they refilled. */
 		if (head == vq->num) {
-			int num_pends = 0;
+			int num_pends;
 
 			/* If more outstanding DMAs, queue the work. */
-			if (nvq->ubufs)
-				num_pends = atomic_read(&nvq->ubufs->kref.refcount);
+			num_pends = atomic_read(&nvq->ubuf_kref.refcount);
 			if (unlikely(num_pends > VHOST_MAX_PEND))
 				break;
 			if (unlikely(vhost_enable_notify(&net->dev, vq))) {
@@ -398,12 +361,12 @@ static void handle_tx(struct vhost_net *net)
 		if (vubuf) {
 			vubuf->id = head;
 			vubuf->ubuf.callback = vhost_zerocopy_callback;
-			vubuf->ubufs = nvq->ubufs;
+			vubuf->nvq = nvq;
 
 			msg.msg_control = vubuf;
 			/* Ignored, but fill in for completeness. */
 			msg.msg_controllen = sizeof(*vubuf);
-			kref_get(&nvq->ubufs->kref);
+			kref_get(&nvq->ubuf_kref);
 		} else {
 			msg.msg_control = NULL;
 			msg.msg_controllen = 0;
@@ -414,7 +377,7 @@ static void handle_tx(struct vhost_net *net)
 		if (unlikely(err < 0)) {
 			if (vubuf) {
 				kmem_cache_free(ubuf_cache, vubuf);
-				vhost_net_ubuf_put(nvq->ubufs);
+				vhost_net_ubuf_put(nvq);
 			}
 			vhost_discard_vq_desc(vq, 1);
 			break;
@@ -683,7 +646,10 @@ static int vhost_net_open(struct inode *inode, struct file *f)
 	n->vqs[VHOST_NET_VQ_TX].vq.handle_kick = handle_tx_kick;
 	n->vqs[VHOST_NET_VQ_RX].vq.handle_kick = handle_rx_kick;
 	for (i = 0; i < VHOST_NET_VQ_MAX; i++) {
-		n->vqs[i].ubufs = NULL;
+		kref_init(&n->vqs[i].ubuf_kref);
+		init_waitqueue_head(&n->vqs[i].ubuf_wait);
+		spin_lock_init(&n->vqs[i].completed_lock);
+		INIT_LIST_HEAD(&n->vqs[i].completed);
 		n->vqs[i].vhost_hlen = 0;
 		n->vqs[i].sock_hlen = 0;
 	}
@@ -762,21 +728,18 @@ static void __vhost_net_pause(struct vhost_net *n)
 	for (i = 0; i < VHOST_NET_VQ_MAX; i++) {
 		struct vhost_net_virtqueue *vq = &n->vqs[i];
 
-		if (!vq->ubufs)
-			continue;
-
 		/* Drop refcount so they call wakeup callback. */
-		atomic_dec(&vq->ubufs->kref.refcount);
+		atomic_dec(&vq->ubuf_kref.refcount);
 
 		/* Make sure it's seen new paused value */
 		mutex_lock(&vq->vq.mutex);
 		mutex_unlock(&vq->vq.mutex);
 
-		wait_event(vq->ubufs->wait,
-			   !atomic_read(&vq->ubufs->kref.refcount));
+		wait_event(vq->ubuf_wait,
+			   !atomic_read(&vq->ubuf_kref.refcount));
 
 		/* Restore reference count. */
-		atomic_inc(&vq->ubufs->kref.refcount);
+		atomic_inc(&vq->ubuf_kref.refcount);
 	}
 }
 
@@ -909,7 +872,6 @@ static long vhost_net_set_backend(struct vhost_net *n, unsigned index, int fd)
 	struct socket *sock, *oldsock;
 	struct vhost_virtqueue *vq;
 	struct vhost_net_virtqueue *nvq;
-	struct vhost_net_ubuf_ref *ubufs, *oldubufs = NULL;
 	int r;
 
 	mutex_lock(&n->dev.mutex);
@@ -939,13 +901,6 @@ static long vhost_net_set_backend(struct vhost_net *n, unsigned index, int fd)
 	/* start polling new socket */
 	oldsock = vq->private_data;
 	if (sock != oldsock) {
-		ubufs = vhost_net_ubuf_alloc(nvq,
-					     sock && vhost_sock_zcopy(sock));
-		if (IS_ERR(ubufs)) {
-			r = PTR_ERR(ubufs);
-			goto err_ubufs;
-		}
-
 		vhost_net_disable_vq(n, vq);
 		vq->private_data = sock;
 		r = vhost_init_used(vq);
@@ -955,17 +910,11 @@ static long vhost_net_set_backend(struct vhost_net *n, unsigned index, int fd)
 		if (r)
 			goto err_used;
 
-		oldubufs = nvq->ubufs;
-		nvq->ubufs = ubufs;
-
 		n->tx_packets = 0;
 		n->tx_zcopy_err = 0;
 	}
 
 	mutex_unlock(&vq->mutex);
-
-	if (oldubufs)
-		vhost_net_ubuf_put_wait_and_free(oldubufs);
 
 	if (oldsock) {
 		vhost_net_flush_vq(n, index);
@@ -978,9 +927,6 @@ static long vhost_net_set_backend(struct vhost_net *n, unsigned index, int fd)
 err_used:
 	vq->private_data = oldsock;
 	vhost_net_enable_vq(n, vq);
-	if (ubufs)
-		vhost_net_ubuf_put_wait_and_free(ubufs);
-err_ubufs:
 	fput(sock->file);
 err_vq:
 	mutex_unlock(&vq->mutex);
