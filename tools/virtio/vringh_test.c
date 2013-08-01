@@ -633,6 +633,7 @@ int main(int argc, char *argv[])
 			errx(1, "vringh_getdesc_user: %i", err);
 		used[i].id = head;
 		used[i].len = 0;
+		riov.used = wiov.used = 0;
 	}
 	/* Make sure it wraps around ring, to test! */
 	assert(vrh.vring.used->idx % RINGSIZE != 0);

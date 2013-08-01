@@ -272,6 +272,7 @@ again:
 				cfv->ctx.head = USHRT_MAX;
 			}
 
+			riov->used = 0;
 			err = vringh_getdesc_kern(
 				cfv->vr_rx,
 				riov,

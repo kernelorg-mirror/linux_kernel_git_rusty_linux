@@ -266,13 +266,8 @@ __vringh_iov(struct vringh *vrh, u16 i,
 	desc_max = vrh->vring.num;
 	up_next = -1;
 
-	if (riov)
-		riov->i = riov->used = 0;
-	else if (wiov)
-		wiov->i = wiov->used = 0;
-	else
-		/* You must want something! */
-		BUG();
+	/* You must want something! */
+	BUG_ON(!riov && !wiov);
 
 	for (;;) {
 		void *addr;
@@ -618,7 +613,11 @@ EXPORT_SYMBOL(vringh_init_user);
  * *head will be vrh->vring.num.  You may be able to ignore an invalid
  * descriptor, but there's not much you can do with an invalid ring.
  *
- * Note that you may need to clean up riov and wiov, even on error!
+ * Note that the descriptors are *appended* to riov/wiov (this is useful
+ * for vring/net.c which gets multiple buffers for VIRTIO_NET_F_MRG_RXBUF),
+ * so you will need to set ->used to 0 if you're reusing buffers.
+ *
+ * Note also that you may need to clean up riov and wiov, even on error!
  */
 int vringh_getdesc_user(struct vringh *vrh,
 			struct vringh_iov *riov,
@@ -876,7 +875,11 @@ EXPORT_SYMBOL(vringh_init_kern);
  * *head will be vrh->vring.num.  You may be able to ignore an invalid
  * descriptor, but there's not much you can do with an invalid ring.
  *
- * Note that you may need to clean up riov and wiov, even on error!
+ * Note that the descriptors are *appended* to riov/wiov (this is useful
+ * for vring/net.c which gets multiple buffers for VIRTIO_NET_F_MRG_RXBUF),
+ * so you will need to set ->used to 0 if you're reusing buffers.
+ *
+ * Note also that you may need to clean up riov and wiov, even on error!
  */
 int vringh_getdesc_kern(struct vringh *vrh,
 			struct vringh_kiov *riov,
