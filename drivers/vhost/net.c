@@ -113,8 +113,6 @@ struct vhost_net {
 	unsigned tx_zcopy_err;
 	/* Paused.  Don't do anything. */
 	unsigned paused;
-	/* Flush in progress. Protected by tx vq lock. */
-	bool tx_flush;
 };
 
 static unsigned vhost_net_zcopy_mask __read_mostly;
@@ -196,11 +194,7 @@ static void vhost_net_tx_err(struct vhost_net *net)
 
 static bool vhost_net_tx_select_zcopy(struct vhost_net *net)
 {
-	/* TX flush waits for outstanding DMAs to be done.
-	 * Don't start new DMAs.
-	 */
-	return !net->tx_flush &&
-		net->tx_packets / 64 >= net->tx_zcopy_err;
+	return net->tx_packets / 64 >= net->tx_zcopy_err;
 }
 
 static bool vhost_sock_zcopy(struct socket *sock)
@@ -822,17 +816,6 @@ static void vhost_net_flush(struct vhost_net *n)
 {
 	vhost_net_flush_vq(n, VHOST_NET_VQ_TX);
 	vhost_net_flush_vq(n, VHOST_NET_VQ_RX);
-	if (n->vqs[VHOST_NET_VQ_TX].ubufs) {
-		mutex_lock(&n->vqs[VHOST_NET_VQ_TX].vq.mutex);
-		n->tx_flush = true;
-		mutex_unlock(&n->vqs[VHOST_NET_VQ_TX].vq.mutex);
-		/* Wait for all lower device DMAs done. */
-		vhost_net_ubuf_put_and_wait(n->vqs[VHOST_NET_VQ_TX].ubufs);
-		mutex_lock(&n->vqs[VHOST_NET_VQ_TX].vq.mutex);
-		n->tx_flush = false;
-		kref_init(&n->vqs[VHOST_NET_VQ_TX].ubufs->kref);
-		mutex_unlock(&n->vqs[VHOST_NET_VQ_TX].vq.mutex);
-	}
 }
 
 static int vhost_net_release(struct inode *inode, struct file *f)
@@ -842,6 +825,7 @@ static int vhost_net_release(struct inode *inode, struct file *f)
 	struct socket *rx_sock;
 
 	vhost_net_stop(n, &tx_sock, &rx_sock);
+	vhost_net_pause(n);
 	vhost_net_flush(n);
 	vhost_dev_stop(&n->dev);
 	vhost_dev_cleanup(&n->dev, false);
@@ -850,9 +834,6 @@ static int vhost_net_release(struct inode *inode, struct file *f)
 		fput(tx_sock->file);
 	if (rx_sock)
 		fput(rx_sock->file);
-	/* We do an extra flush before freeing memory,
-	 * since jobs can re-queue themselves. */
-	vhost_net_flush(n);
 	kfree(n->dev.vqs);
 	kfree(n);
 	return 0;
@@ -979,7 +960,6 @@ static long vhost_net_set_backend(struct vhost_net *n, unsigned index, int fd)
 
 		n->tx_packets = 0;
 		n->tx_zcopy_err = 0;
-		n->tx_flush = false;
 	}
 
 	mutex_unlock(&vq->mutex);
@@ -1026,9 +1006,11 @@ static long vhost_net_reset_owner(struct vhost_net *n)
 		goto done;
 	}
 	vhost_net_stop(n, &tx_sock, &rx_sock);
+	__vhost_net_pause(n);
 	vhost_net_flush(n);
 	vhost_dev_reset_owner(&n->dev, memory);
 	vhost_net_vq_reset(n);
+	__vhost_net_unpause(n);
 done:
 	mutex_unlock(&n->dev.mutex);
 	if (tx_sock)
