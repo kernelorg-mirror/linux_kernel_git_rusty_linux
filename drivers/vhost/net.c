@@ -111,6 +111,8 @@ struct vhost_net {
 	/* Number of times zerocopy TX recently failed.
 	 * Protected by tx vq lock. */
 	unsigned tx_zcopy_err;
+	/* Paused.  Don't do anything. */
+	unsigned paused;
 	/* Flush in progress. Protected by tx vq lock. */
 	bool tx_flush;
 };
@@ -336,6 +338,10 @@ static void handle_tx(struct vhost_net *net)
 	if (!sock)
 		goto out;
 
+	/* Do nothing if we are paused. */
+	if (net->paused)
+		goto out;
+
 	vhost_disable_notify(&net->dev, vq);
 
 	hdr_size = nvq->vhost_hlen;
@@ -546,6 +552,10 @@ static void handle_rx(struct vhost_net *net)
 	sock = vq->private_data;
 	if (!sock)
 		goto out;
+	/* Do nothing if we are paused. */
+	if (net->paused)
+		goto out;
+
 	vhost_disable_notify(&net->dev, vq);
 
 	vhost_hlen = nvq->vhost_hlen;
@@ -692,6 +702,7 @@ static int vhost_net_open(struct inode *inode, struct file *f)
 
 	vhost_poll_init(n->poll + VHOST_NET_VQ_TX, handle_tx_net, POLLOUT, dev);
 	vhost_poll_init(n->poll + VHOST_NET_VQ_RX, handle_rx_net, POLLIN, dev);
+	n->paused = 0;
 
 	f->private_data = n;
 
@@ -742,6 +753,63 @@ static void vhost_net_stop(struct vhost_net *n, struct socket **tx_sock,
 {
 	*tx_sock = vhost_net_stop_vq(n, &n->vqs[VHOST_NET_VQ_TX].vq);
 	*rx_sock = vhost_net_stop_vq(n, &n->vqs[VHOST_NET_VQ_RX].vq);
+}
+
+/* Should be holding n->dev.mutex, though ->release doesn't need to */
+static void __vhost_net_pause(struct vhost_net *n)
+{
+	unsigned int i;
+
+	n->paused++;
+	if (n->paused > 1)
+		return;
+
+	/* Wait for any pending zero copy buffers. */
+	for (i = 0; i < VHOST_NET_VQ_MAX; i++) {
+		struct vhost_net_virtqueue *vq = &n->vqs[i];
+
+		if (!vq->ubufs)
+			continue;
+
+		/* Drop refcount so they call wakeup callback. */
+		atomic_dec(&vq->ubufs->kref.refcount);
+
+		/* Make sure it's seen new paused value */
+		mutex_lock(&vq->vq.mutex);
+		mutex_unlock(&vq->vq.mutex);
+
+		wait_event(vq->ubufs->wait,
+			   !atomic_read(&vq->ubufs->kref.refcount));
+
+		/* Restore reference count. */
+		atomic_inc(&vq->ubufs->kref.refcount);
+	}
+}
+
+static void __vhost_net_unpause(struct vhost_net *n)
+{
+	unsigned int i;
+
+	n->paused--;
+	if (!n->paused) {
+		for (i = 0; i < VHOST_NET_VQ_MAX; i++)
+			vhost_poll_queue(&n->vqs[i].vq.poll);
+	}
+}
+
+/* Stop the device, so we can play with it. */
+static void vhost_net_pause(struct vhost_net *n)
+{
+	mutex_lock(&n->dev.mutex);
+	__vhost_net_pause(n);
+	mutex_unlock(&n->dev.mutex);
+}
+
+static void vhost_net_unpause(struct vhost_net *n)
+{
+	mutex_lock(&n->dev.mutex);
+	__vhost_net_unpause(n);
+	mutex_unlock(&n->dev.mutex);
 }
 
 static void vhost_net_flush_vq(struct vhost_net *n, int index)
@@ -1032,26 +1100,36 @@ static long vhost_net_ioctl(struct file *f, unsigned int ioctl,
 	u64 features;
 	int r;
 
+	vhost_net_pause(n);
+
 	switch (ioctl) {
 	case VHOST_NET_SET_BACKEND:
 		if (copy_from_user(&backend, argp, sizeof backend))
-			return -EFAULT;
-		return vhost_net_set_backend(n, backend.index, backend.fd);
+			r = -EFAULT;
+		else
+			r = vhost_net_set_backend(n, backend.index, backend.fd);
+		break;
 	case VHOST_GET_FEATURES:
 		features = VHOST_NET_FEATURES;
 		if (copy_to_user(featurep, &features, sizeof features))
-			return -EFAULT;
-		return 0;
+			r = -EFAULT;
+		else
+			r = 0;
+		break;
 	case VHOST_SET_FEATURES:
 		if (copy_from_user(&features, featurep, sizeof features))
-			return -EFAULT;
-		if (features & ~VHOST_NET_FEATURES)
-			return -EOPNOTSUPP;
-		return vhost_net_set_features(n, features);
+			r = -EFAULT;
+		else if (features & ~VHOST_NET_FEATURES)
+			r = -EOPNOTSUPP;
+		else
+			r = vhost_net_set_features(n, features);
+		break;
 	case VHOST_RESET_OWNER:
-		return vhost_net_reset_owner(n);
+		r = vhost_net_reset_owner(n);
+		break;
 	case VHOST_SET_OWNER:
-		return vhost_net_set_owner(n);
+		r = vhost_net_set_owner(n);
+		break;
 	default:
 		mutex_lock(&n->dev.mutex);
 		r = vhost_dev_ioctl(&n->dev, ioctl, argp);
@@ -1060,8 +1138,10 @@ static long vhost_net_ioctl(struct file *f, unsigned int ioctl,
 		else
 			vhost_net_flush(n);
 		mutex_unlock(&n->dev.mutex);
-		return r;
 	}
+
+	vhost_net_unpause(n);
+	return r;
 }
 
 #ifdef CONFIG_COMPAT
