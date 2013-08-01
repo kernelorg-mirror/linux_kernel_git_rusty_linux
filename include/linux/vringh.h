@@ -136,6 +136,23 @@ static inline void vringh_iov_cleanup(struct vringh_iov *iov)
 	iov->iov = NULL;
 }
 
+/* Helper for non-destructive vringh_iov iteration */
+static inline void vringh_iov_consume(struct vringh_iov *iov, size_t len)
+{
+	iov->consumed += len;
+	iov->iov[iov->i].iov_len -= len;
+	iov->iov[iov->i].iov_base += len;
+
+	if (!iov->iov[iov->i].iov_len) {
+		/* Fix up old iov element then increment. */
+		iov->iov[iov->i].iov_len = iov->consumed;
+		iov->iov[iov->i].iov_base -= iov->consumed;
+	
+		iov->consumed = 0;
+		iov->i++;
+	}
+}
+
 /* Convert a descriptor into iovecs. */
 int vringh_getdesc_user(struct vringh *vrh,
 			struct vringh_iov *riov,

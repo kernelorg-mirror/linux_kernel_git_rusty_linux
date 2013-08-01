@@ -81,21 +81,10 @@ static inline ssize_t vringh_iov_xfer(struct vringh_kiov *iov,
 		err = xfer(iov->iov[iov->i].iov_base, ptr, partlen);
 		if (err)
 			return err;
+		vringh_iov_consume((struct vringh_iov *)iov, partlen);
 		done += partlen;
 		len -= partlen;
 		ptr += partlen;
-		iov->consumed += partlen;
-		iov->iov[iov->i].iov_len -= partlen;
-		iov->iov[iov->i].iov_base += partlen;
-
-		if (!iov->iov[iov->i].iov_len) {
-			/* Fix up old iov element then increment. */
-			iov->iov[iov->i].iov_len = iov->consumed;
-			iov->iov[iov->i].iov_base -= iov->consumed;
-			
-			iov->consumed = 0;
-			iov->i++;
-		}
 	}
 	return done;
 }
