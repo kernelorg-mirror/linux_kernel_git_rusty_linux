@@ -54,3 +54,12 @@ config PPC_PASEMI_CPUFREQ
 	help
 	  This adds the support for frequency switching on PA Semi
 	  PWRficient processors.
+
+config BOOK3S_CPUFREQ
+       tristate "IBM POWER Book3s platform cpu frequency scaling"
+       depends on PPC_POWERNV
+       select CPU_FREQ_TABLE
+       default y
+       help
+         This adds the cpufreq driver for IBM POWER Book3s processors
+         in powernv environment

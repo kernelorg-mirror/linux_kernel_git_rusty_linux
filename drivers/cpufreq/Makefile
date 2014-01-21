@@ -86,6 +86,7 @@ obj-$(CONFIG_PPC_CORENET_CPUFREQ)   += ppc-corenet-cpufreq.o
 obj-$(CONFIG_CPU_FREQ_PMAC)		+= pmac32-cpufreq.o
 obj-$(CONFIG_CPU_FREQ_PMAC64)		+= pmac64-cpufreq.o
 obj-$(CONFIG_PPC_PASEMI_CPUFREQ)	+= pasemi-cpufreq.o
+obj-$(CONFIG_BOOK3S_CPUFREQ)		+= powerpc-book3s-cpufreq.o
 
 ##################################################################################
 # Other platform drivers
