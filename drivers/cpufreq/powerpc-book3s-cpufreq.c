@@ -45,11 +45,11 @@ static struct cpufreq_frequency_table powernv_freqs[POWERNV_MAX_PSTATES+1];
 static int init_powernv_pstates(void)
 {
 	struct device_node *power_mgt;
-	struct property *prop;
 	int nr_pstates = 0;
 	int pstate_min, pstate_max, pstate_nominal;
-	u32 *pstate_ids, *pstate_freqs;
+	const __be32 *pstate_ids, *pstate_freqs;
 	int i;
+	u32 len_ids, len_freqs;
 
 	power_mgt = of_find_node_by_path("/ibm,opal/power-mgt");
 	if (!power_mgt) {
@@ -58,62 +58,59 @@ static int init_powernv_pstates(void)
 		return -ENODEV;
 	}
 
-	prop = of_find_property(power_mgt, "ibm,pstate-min", NULL);
-	if (!prop) {
+	if (of_property_read_u32(power_mgt, "ibm,pstate-min", &pstate_min)) {
 		pr_warn("powernv-cpufreq: \
 			DT node /ibm,opal/power-mgt/ibm,pstate-min \
 			not found\n");
 		return -ENODEV;
 	}
-	pstate_min = * (u32 *) prop->value;
 
-	prop = of_find_property(power_mgt, "ibm,pstate-max", NULL);
-	if (!prop) {
+	if (of_property_read_u32(power_mgt, "ibm,pstate-max", &pstate_max)) {
 		pr_warn("powernv-cpufreq: \
 			DT node /ibm,opal/power-mgt/ibm,pstate-max \
 			not found\n");
 		return -ENODEV;
 	}
-	pstate_max = * (u32 *) prop->value;
 
-	prop = of_find_property(power_mgt, "ibm,pstate-nominal", NULL);
-	if (!prop) {
+	if (of_property_read_u32(power_mgt, "ibm,pstate-nominal",
+				 &pstate_nominal)) {
 		pr_warn("powernv-cpufreq: \
 			DT node /ibm,opal/power-mgt/ibm,pstate-nominal \
 			not found\n");
 		return -ENODEV;
 	}
-	pstate_nominal = * (u32 *) prop->value;
 	printk(KERN_INFO "cpufreq pstate min %d nominal %d max %d\n", pstate_min, pstate_nominal,
 						pstate_max);
 
-	prop = of_find_property(power_mgt, "ibm,pstate-ids", NULL);
-	if (!prop) {
+	pstate_ids = of_get_property(power_mgt, "ibm,pstate-ids", &len_ids);
+	if (!pstate_ids) {
 		pr_warn("powernv-cpufreq: \
 			DT node /ibm,opal/power-mgt/ibm,pstate-ids \
 			not found\n");
 		return -ENODEV;
 	}
-	pstate_ids = (u32 *) prop->value;
 
-	prop = of_find_property(power_mgt, "ibm,pstate-frequencies-mhz", NULL);
-	if (!prop) {
+	pstate_freqs = of_get_property(power_mgt, "ibm,pstate-frequencies-mhz",
+				      &len_freqs);
+	if (!pstate_freqs) {
 		pr_warn("powernv-cpufreq: \
 		DT node /ibm,opal/power-mgt/ibm,pstate-frequencies-mhz \
 					not found\n");
 		return -ENODEV;
 	}
-	pstate_freqs = (u32 *) prop->value;
 
-	nr_pstates = prop->length/sizeof(u32);
-
+	WARN_ON(len_ids != len_freqs);
+	nr_pstates = min(len_ids, len_freqs) / sizeof(u32);
 	WARN_ON(!nr_pstates);
 
 	pr_debug("NR PStates %d\n", nr_pstates);
 	for (i = 0; i < nr_pstates; i++) {
-		pr_debug("PState id %d freq %d MHz\n", pstate_ids[i], pstate_freqs[i]);
-		powernv_freqs[i].driver_data = pstate_ids[i];
-		powernv_freqs[i].frequency = pstate_freqs[i] * 1000; /* kHz */
+		u32 id = be32_to_cpu(pstate_ids[i]);
+		u32 freq = be32_to_cpu(pstate_freqs[i]);
+
+		pr_debug("PState id %d freq %d MHz\n", id, freq);
+		powernv_freqs[i].driver_data = id;
+		powernv_freqs[i].frequency = freq * 1000; /* kHz */
 	}
 	/* End entry */
 	powernv_freqs[i].driver_data = 0;
