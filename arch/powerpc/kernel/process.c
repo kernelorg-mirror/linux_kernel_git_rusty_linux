@@ -956,10 +956,14 @@ int copy_thread(unsigned long clone_flags, unsigned long usp,
 		struct thread_info *ti = (void *)task_stack_page(p);
 		memset(childregs, 0, sizeof(struct pt_regs));
 		childregs->gpr[1] = sp + sizeof(struct pt_regs);
-		childregs->gpr[14] = usp;	/* function */
 #ifdef CONFIG_PPC64
 		clear_tsk_thread_flag(p, TIF_32BIT);
 		childregs->softe = 1;
+#endif
+#if defined(CONFIG_PPC64) && (!defined(_CALL_ELF) || _CALL_ELF != 2)
+		childregs->gpr[14] = *(unsigned long *)usp;	/* function */
+#else
+		childregs->gpr[14] = usp;	/* function */
 #endif
 		childregs->gpr[15] = arg;
 		p->thread.regs = NULL;	/* no user register state */
@@ -974,6 +978,7 @@ int copy_thread(unsigned long clone_flags, unsigned long usp,
 		p->thread.regs = childregs;
 		childregs->gpr[3] = 0;  /* Result from fork() */
 		if (clone_flags & CLONE_SETTLS) {
+/* FIXME */
 #ifdef CONFIG_PPC64
 			if (!is_32bit_task())
 				childregs->gpr[13] = childregs->gpr[6];
@@ -1041,7 +1046,7 @@ int copy_thread(unsigned long clone_flags, unsigned long usp,
 	 * to the TOC entry.  The first entry is a pointer to the actual
 	 * function.
 	 */
-#ifdef CONFIG_PPC64
+#if defined(CONFIG_PPC64) && (!defined(_CALL_ELF) || _CALL_ELF != 2)
 	kregs->nip = *((unsigned long *)f);
 #else
 	kregs->nip = (unsigned long)f;
