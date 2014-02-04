@@ -1257,7 +1257,7 @@ END_FTR_SECTION_IFSET(CPU_FTR_ARCH_206)
 
 	/* save FP state */
 	mr	r3, r9
-	bl	.kvmppc_save_fp
+	bl	kvmppc_save_fp
 
 	/* Increment yield count if they have a VPA */
 	ld	r8, VCPU_VPA(r9)	/* do they have a VPA? */
@@ -1366,7 +1366,7 @@ kvmppc_hdsi:
 	/* Search the hash table. */
 	mr	r3, r9			/* vcpu pointer */
 	li	r7, 1			/* data fault */
-	bl	.kvmppc_hpte_hv_fault
+	bl	kvmppc_hpte_hv_fault
 	ld	r9, HSTATE_KVM_VCPU(r13)
 	ld	r10, VCPU_PC(r9)
 	ld	r11, VCPU_MSR(r9)
@@ -1441,7 +1441,7 @@ kvmppc_hisi:
 	mr	r4, r10
 	mr	r6, r11
 	li	r7, 0			/* instruction fault */
-	bl	.kvmppc_hpte_hv_fault
+	bl	kvmppc_hpte_hv_fault
 	ld	r9, HSTATE_KVM_VCPU(r13)
 	ld	r10, VCPU_PC(r9)
 	ld	r11, VCPU_MSR(r9)
@@ -1677,7 +1677,7 @@ END_FTR_SECTION_IFCLR(CPU_FTR_ARCH_206)
 	std	r31, VCPU_GPR(R31)(r3)
 
 	/* save FP state */
-	bl	.kvmppc_save_fp
+	bl	kvmppc_save_fp
 
 	/*
 	 * Take a nap until a decrementer or external interrupt occurs,
@@ -1775,7 +1775,7 @@ kvm_cede_exit:
 	/* Try to handle a machine check in real mode */
 machine_check_realmode:
 	mr	r3, r9		/* get vcpu pointer */
-	bl	.kvmppc_realmode_machine_check
+	bl	kvmppc_realmode_machine_check
 	nop
 	cmpdi	r3, 0		/* continue exiting from guest? */
 	ld	r9, HSTATE_KVM_VCPU(r13)
