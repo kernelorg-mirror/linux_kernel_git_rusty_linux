@@ -328,12 +328,16 @@ static inline unsigned long hpt_hash(unsigned long vpn,
 	return hash & 0x7fffffffffUL;
 }
 
+/*
+ * XXX FIXME: __hash_page_4K and __hash_page_64K have bad STK_PARAM usage.
+ * Work around it by declaring it as a varargs function.
+ */
 extern int __hash_page_4K(unsigned long ea, unsigned long access,
 			  unsigned long vsid, pte_t *ptep, unsigned long trap,
-			  unsigned int local, int ssize, int subpage_prot);
+			  unsigned int local, int ssize, int subpage_prot, ...);
 extern int __hash_page_64K(unsigned long ea, unsigned long access,
 			   unsigned long vsid, pte_t *ptep, unsigned long trap,
-			   unsigned int local, int ssize);
+			   unsigned int local, int ssize, ...);
 struct mm_struct;
 unsigned int hash_page_do_lazy_icache(unsigned int pp, pte_t pte, int trap);
 extern int hash_page(unsigned long ea, unsigned long access, unsigned long trap);
